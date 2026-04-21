@@ -328,9 +328,8 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
     Layout storage $ = _getStorage();
     uint256 newUntil;
     unchecked {
-      newUntil = secondsDuration > type(uint48).max - block.timestamp
-        ? type(uint48).max
-        : block.timestamp + secondsDuration;
+      newUntil =
+        secondsDuration > type(uint48).max - block.timestamp ? type(uint48).max : block.timestamp + secondsDuration;
     }
     // Revert on any call that wouldn't produce an actually-paused state
     // strictly beyond the current `pausedUntil`. Covers both `pauseFor(0)`
@@ -491,9 +490,7 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
   /// @param  on       The new flag value.
   /// @param  deadline Deadline signed into the sigs.
   /// @param  sigs     Validator signatures covering the request.
-  function setComplianceOfficerBySig(address a, bool on, uint256 deadline, QuorumSigLib.Sig[] calldata sigs)
-    external
-  {
+  function setComplianceOfficerBySig(address a, bool on, uint256 deadline, QuorumSigLib.Sig[] calldata sigs) external {
     _requireRenounced();
     _verifyAdminQuorum(ACTION_SET_COMPLIANCE, abi.encode(a, on), deadline, sigs);
     _setComplianceOfficer(_getStorage(), a, on);

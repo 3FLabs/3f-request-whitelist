@@ -928,12 +928,10 @@ contract RequestWhitelistTest is Test {
 
     address newOfficer = makeAddr("newOfficer");
     uint256 deadline = block.timestamp + 1 hours;
-    QuorumSigLib.Sig[] memory swapIn =
-      _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(newOfficer, true), deadline);
+    QuorumSigLib.Sig[] memory swapIn = _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(newOfficer, true), deadline);
     wl.setComplianceOfficerBySig(newOfficer, true, deadline, swapIn);
 
-    QuorumSigLib.Sig[] memory swapOut =
-      _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(compliance, false), deadline);
+    QuorumSigLib.Sig[] memory swapOut = _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(compliance, false), deadline);
     wl.setComplianceOfficerBySig(compliance, false, deadline, swapOut);
 
     assertFalse(wl.isComplianceOfficer(compliance));
