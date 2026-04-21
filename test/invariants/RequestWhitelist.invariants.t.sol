@@ -4,7 +4,6 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {RequestWhitelist} from "../../src/RequestWhitelist.sol";
 import {IWhitelist} from "../../src/IWhitelist.sol";
-import {QuorumSigLib} from "../../src/lib/QuorumSigLib.sol";
 import {RequestWhitelistHandler} from "./handlers/RequestWhitelistHandler.sol";
 
 /// @title  RequestWhitelistInvariants

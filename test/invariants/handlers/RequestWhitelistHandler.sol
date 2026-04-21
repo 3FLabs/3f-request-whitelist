@@ -4,7 +4,6 @@ pragma solidity ^0.8.24;
 import {Test, Vm} from "forge-std/Test.sol";
 import {ERC1967Factory} from "solady/utils/ERC1967Factory.sol";
 import {RequestWhitelist} from "../../../src/RequestWhitelist.sol";
-import {IWhitelist} from "../../../src/IWhitelist.sol";
 import {QuorumSigLib} from "../../../src/lib/QuorumSigLib.sol";
 
 /// @title  RequestWhitelistHandler

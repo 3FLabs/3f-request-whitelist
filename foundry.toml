@@ -33,4 +33,20 @@ shrink_run_limit = 20_000
 [fmt]
 tab_width = 2
 
+[lint]
+# Exclusions are deliberate, not blanket noise suppression:
+#   mixed-case-function      — handler `h_*` and test constant `ACTION_*` naming is intentional.
+#   asm-keccak256            — `keccak256(abi.encode(...))` is the idiomatic EIP-712 pattern;
+#                              inlining asm hurts auditability for no measurable gas.
+#   unwrapped-modifier-logic — bytecode-size micro-opt; not worth the readability cost on a
+#                              one-liner modifier.
+#   incorrect-shift          — heuristic that flags the legitimate `1 << n` power-of-2 bitmask
+#                              pattern used by nonce bitmaps and call-local dedup.
+exclude_lints = [
+  "mixed-case-function",
+  "asm-keccak256",
+  "unwrapped-modifier-logic",
+  "incorrect-shift",
+]
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

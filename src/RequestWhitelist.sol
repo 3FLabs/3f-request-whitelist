@@ -338,7 +338,11 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
     if (newUntil <= block.timestamp || newUntil <= $.pausedUntil) {
       revert WhitelistErrors.PauseNotExtended();
     }
+    // The saturation above clamps `newUntil` to `type(uint48).max`, so
+    // the downcast is lossless by construction.
+    // forge-lint: disable-next-line(unsafe-typecast)
     $.pausedUntil = uint48(newUntil);
+    // forge-lint: disable-next-line(unsafe-typecast)
     emit WhitelistEvents.Paused(uint48(newUntil));
   }
 
