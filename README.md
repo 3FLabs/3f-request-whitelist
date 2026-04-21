@@ -35,26 +35,70 @@ revocable).
 
 ### Key invariants
 
-- `1 <= quorum < validators.length <= MAX_VALIDATORS` (256). The strict
-  inequality between `quorum` and `validators.length` guarantees that no
-  quorum-sized coalition can brick or fully capture the registry by
-  shrinking the set down to its own membership.
-- Each validator signature carries a signer-chosen nonce. The nonce is
-  recorded in a per-validator bitmap on successful verify and permanently
-  single-use; sigs at any unused nonce above the validator's floor can be
+Every property below holds across every reachable state transition. The
+A/B/C/D/E grouping is reused in the invariant test harness so a failing
+run points straight at the clause that broke.
+
+**A. Validator set & quorum structure**
+
+- **A1.** `1 <= quorum < validators.length <= MAX_VALIDATORS` (256). The
+  strict inequality between `quorum` and `validators.length` guarantees
+  that no quorum-sized coalition can brick or fully capture the registry
+  by shrinking the set down to its own membership.
+- **A2.** The validator set never contains duplicates and never contains
+  `address(0)`. `_addValidator` rejects both; the set itself is a
+  solady `EnumerableSetLib.AddressSet` so duplicates are structurally
+  impossible.
+- **A3.** The three public views over the validator set
+  (`validators()`, `validatorAt(i)`, `isValidator(a)`) agree on every
+  element. `validatorsLength()` equals `validators().length`.
+
+**B. Nonce discipline**
+
+- **B1.** `validatorNonceFloor[v]` is monotonically non-decreasing.
+  `setValidatorNonce` is strict-increase; `_removeValidator` and
+  `revokeAllRoles` saturate to `type(uint256).max`; no other writer
+  exists.
+- **B2.** Once a validator has ever been removed, their nonce floor is
+  `type(uint256).max` forever — even if the same address is later
+  re-added. Combined with the bitmap's permanent-set property this
+  closes the re-add replay window: no signature the retired address
+  ever produced can pass `NonceBelowFloor` again.
+- **B3.** Each validator signature carries a signer-chosen nonce. The
+  nonce is recorded in a per-validator bitmap on successful verify and
+  permanently single-use — a bit set to `1` never returns to `0`. Sigs
+  at any unused nonce at or above the validator's current floor can be
   submitted **in any order**.
-- A per-validator `nonceFloor` is the mass-invalidate lever. Sigs at a
-  nonce strictly below the floor are rejected `NonceBelowFloor`. The
-  validator themselves raises the floor via `setValidatorNonce`; removal
-  saturates it to `type(uint256).max` so a removed validator's address is
-  permanently retired.
-- `isWhitelisted(a)` never returns `WhitelistStatus.Whitelisted` while
-  `block.timestamp < pausedUntil`, regardless of underlying storage.
-- While paused, `whitelist` and `unwhitelist` revert with `ContractPaused`.
-  Compliance `pauseFor` / `unpause` and every rotation path
-  (`setValidatorNonce`, all `*BySig` admin functions) remain reachable — the
-  circuit breaker exists to buy the quorum time to rotate, not to freeze
-  rotation itself.
+
+**C. Pause state machine**
+
+- **C1.** `pausedUntil` moves forward via `pauseFor` (extend-only,
+  reverts `PauseNotExtended` on any call that wouldn't strictly extend
+  the current window) and drops to `0` via `unpause`. It never shrinks
+  to a non-zero value.
+- **C2.** `isPaused()` is a pure function of `pausedUntil` and
+  `block.timestamp` — no cached pause state anywhere.
+- **C3.** While paused, `whitelist` and `unwhitelist` revert with
+  `ContractPaused`. Compliance `pauseFor` / `unpause` and every
+  rotation path (`setValidatorNonce`, all `*BySig` admin functions)
+  remain reachable — the circuit breaker exists to buy the quorum time
+  to rotate, not to freeze rotation itself.
+
+**D. `isWhitelisted` semantics**
+
+- **D1.** While paused, `isWhitelisted(a)` never returns
+  `Whitelisted` or `NotWhitelisted` — the return is always one of the
+  `Paused*` variants, regardless of the underlying attestation bit.
+- **D2.** While live (not paused), `isWhitelisted(a)` returns exactly
+  one of `Whitelisted` / `NotWhitelisted`, matching the `_isWhitelisted`
+  bit.
+
+**E. Ownership irreversibility**
+
+- **E1.** Once `owner()` becomes `address(0)`, it stays there.
+  `renounceOwnership()` is the only writer to zero and has no inverse;
+  the Phase-1 admin surface cannot be re-opened after handover to the
+  validator quorum.
 
 ### Return-value enum
 
