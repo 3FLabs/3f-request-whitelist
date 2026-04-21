@@ -2,6 +2,33 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+optimizer = true
+optimizer_runs = 10_000
+solc_version = "0.8.24"
+
+[profile.default.fuzz]
+runs = 1_000
+seed = "0x1"
+
+[profile.default.invariant]
+runs = 256
+depth = 128
+fail_on_revert = false
+call_override = false
+dictionary_weight = 80
+include_storage = true
+include_push_bytes = true
+shrink_run_limit = 5_000
+
+# Opt-in "stress" profile for deeper invariant / fuzz runs before a
+# release. Activate with `FOUNDRY_PROFILE=stress forge test`.
+[profile.stress.fuzz]
+runs = 10_000
+
+[profile.stress.invariant]
+runs = 1_024
+depth = 512
+shrink_run_limit = 20_000
 
 [fmt]
 tab_width = 2

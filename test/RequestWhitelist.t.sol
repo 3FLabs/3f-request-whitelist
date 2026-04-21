@@ -6,6 +6,7 @@ import {ERC1967Factory} from "solady/utils/ERC1967Factory.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {Initializable} from "solady/utils/Initializable.sol";
 import {RequestWhitelist} from "../src/RequestWhitelist.sol";
+import {IWhitelist} from "../src/IWhitelist.sol";
 import {QuorumSigLib} from "../src/lib/QuorumSigLib.sol";
 import {WhitelistErrors} from "../src/lib/WhitelistErrors.sol";
 import {MockERC1271} from "./mocks/MockERC1271.sol";
@@ -26,6 +27,12 @@ contract RequestWhitelistTest is Test {
 
   address internal t0 = makeAddr("target0");
   address internal t1 = makeAddr("target1");
+
+  /// @dev Local per-validator nonce cursor for the test suite. Validators
+  ///      pick any nonce at or above their on-chain floor that has not
+  ///      yet been consumed; the suite picks sequentially starting from
+  ///      the floor so tests don't have to hand-roll nonce allocations.
+  mapping(address => uint256) internal _nextNonce;
 
   // ---------- setup ----------------------------------------------------------
 
@@ -153,17 +160,20 @@ contract RequestWhitelistTest is Test {
     vm.prank(ownerAddr);
     wl.whitelist(targets, deadline, sigs);
 
-    assertTrue(wl.isWhitelisted(t0));
-    assertTrue(wl.isWhitelisted(t1));
+    assertTrue(_listed(t0));
+    assertTrue(_listed(t1));
   }
 
   function testWhitelistWithERC1271Signer() public {
     // Replace v2 with a mock 1271 contract that signs via the same key.
-    vm.prank(ownerAddr);
-    wl.removeValidator(v2.addr);
+    // Add first, then remove — with the strict `quorum < length` invariant,
+    // removing v2 directly from the initial set (3 → 2 with quorum 2) would
+    // revert `QuorumOutOfRange`, so we bounce through length = 4.
     MockERC1271 contractSigner = new MockERC1271(v2.addr);
     vm.prank(ownerAddr);
     wl.addValidator(address(contractSigner));
+    vm.prank(ownerAddr);
+    wl.removeValidator(v2.addr);
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
@@ -178,7 +188,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     wl.whitelist(targets, deadline, sigs);
-    assertTrue(wl.isWhitelisted(t0));
+    assertTrue(_listed(t0));
   }
 
   // ---------- whitelist rejections ------------------------------------------
@@ -272,18 +282,46 @@ contract RequestWhitelistTest is Test {
     wl.whitelist(targets, deadline, sigs);
   }
 
-  function testWhitelistRevertsNonceMismatch() public {
+  function testWhitelistRevertsNonceBelowFloor() public {
+    // Raise v1's floor to 10; any sig they produced at a lower nonce
+    // must be rejected `NonceBelowFloor`.
+    vm.prank(v1.addr);
+    wl.setValidatorNonce(10);
+
     address[] memory targets = new address[](1);
     targets[0] = t0;
     uint256 deadline = block.timestamp + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
-    sigs[1] = _signWhitelistWithNonce(v1, targets, deadline, 5); // wrong nonce
+    sigs[1] = _signWhitelistWithNonce(v1, targets, deadline, 3); // below floor
 
     vm.prank(ownerAddr);
-    vm.expectRevert(QuorumSigLib.NonceMismatch.selector);
+    vm.expectRevert(QuorumSigLib.NonceBelowFloor.selector);
     wl.whitelist(targets, deadline, sigs);
+  }
+
+  function testWhitelistRevertsNonceConsumed() public {
+    // First batch consumes v1's nonce 0; a second batch with the same
+    // sig must be rejected `NonceConsumed`.
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    uint256 deadline = block.timestamp + 1 hours;
+
+    QuorumSigLib.Sig memory v0Sig0 = _signWhitelistWithNonce(v0, targets, deadline, 0);
+    QuorumSigLib.Sig memory v1Sig0 = _signWhitelistWithNonce(v1, targets, deadline, 0);
+    QuorumSigLib.Sig[] memory first = new QuorumSigLib.Sig[](2);
+    first[0] = v0Sig0;
+    first[1] = v1Sig0;
+    vm.prank(ownerAddr);
+    wl.whitelist(targets, deadline, first);
+
+    QuorumSigLib.Sig[] memory replay = new QuorumSigLib.Sig[](2);
+    replay[0] = v0Sig0;
+    replay[1] = v1Sig0;
+    vm.prank(ownerAddr);
+    vm.expectRevert(QuorumSigLib.NonceConsumed.selector);
+    wl.whitelist(targets, deadline, replay);
   }
 
   function testWhitelistRevertsWhenPaused() public {
@@ -317,7 +355,7 @@ contract RequestWhitelistTest is Test {
     wl.setValidatorNonce(42);
 
     vm.prank(ownerAddr);
-    vm.expectRevert(QuorumSigLib.NonceMismatch.selector);
+    vm.expectRevert(QuorumSigLib.NonceBelowFloor.selector);
     wl.whitelist(targets, deadline, sigs);
   }
 
@@ -334,6 +372,103 @@ contract RequestWhitelistTest is Test {
     vm.prank(stranger);
     vm.expectRevert(QuorumSigLib.NotValidator.selector);
     wl.setValidatorNonce(1);
+  }
+
+  /// @dev The nonce floor is a monotonically-raised lever; the bitmap
+  ///      nonce model removes the need to cap below `type(uint256).max`
+  ///      (no per-sig arithmetic bump, so no overflow surface). A
+  ///      validator can therefore legitimately saturate their own
+  ///      floor to `type(uint256).max` to permanently burn their sig
+  ///      space — equivalent to the operator saying "retire this key
+  ///      entirely". Re-admission of the same address is blocked
+  ///      because `setValidatorNonce` is strict-increase.
+  function testSetValidatorNonceAllowsMax() public {
+    vm.prank(v0.addr);
+    wl.setValidatorNonce(type(uint256).max);
+    assertEq(wl.validatorNonceFloor(v0.addr), type(uint256).max);
+
+    // Further setValidatorNonce calls are locked out — nothing is
+    // strictly greater than max.
+    vm.prank(v0.addr);
+    vm.expectRevert(WhitelistErrors.NewNonceNotIncreasing.selector);
+    wl.setValidatorNonce(type(uint256).max);
+  }
+
+  // ---------- L-5: isWhitelisted enum surface -------------------------------
+
+  function testIsWhitelistedEnumNotWhitelisted() public {
+    address never = makeAddr("never");
+    assertTrue(wl.isWhitelisted(never) == IWhitelist.WhitelistStatus.NotWhitelisted);
+  }
+
+  function testIsWhitelistedEnumWhitelisted() public {
+    _whitelistAsOwner(t0);
+    assertTrue(wl.isWhitelisted(t0) == IWhitelist.WhitelistStatus.Whitelisted);
+  }
+
+  function testIsWhitelistedEnumPausedNotWhitelisted() public {
+    address never = makeAddr("never");
+    vm.prank(compliance);
+    wl.pauseFor(1 days);
+    assertTrue(wl.isWhitelisted(never) == IWhitelist.WhitelistStatus.PausedNotWhitelisted);
+  }
+
+  function testIsWhitelistedEnumPausedWhitelisted() public {
+    _whitelistAsOwner(t0);
+    vm.prank(compliance);
+    wl.pauseFor(1 days);
+    assertTrue(wl.isWhitelisted(t0) == IWhitelist.WhitelistStatus.PausedWhitelisted);
+  }
+
+  // ---------- M-1: strict quorum < length -----------------------------------
+
+  function testSetQuorumRejectsQuorumEqualToLength() public {
+    vm.prank(ownerAddr);
+    vm.expectRevert(WhitelistErrors.QuorumOutOfRange.selector);
+    wl.setQuorum(3); // length = 3, so 3 >= 3 reverts
+  }
+
+  function testSetQuorumRejectsUnchanged() public {
+    vm.prank(ownerAddr);
+    vm.expectRevert(WhitelistErrors.QuorumUnchanged.selector);
+    wl.setQuorum(2); // already quorum
+  }
+
+  // ---------- M-5: combined-role revoke -------------------------------------
+
+  function testRevokeAllRolesRemovesBothRoles() public {
+    // Make compliance a validator too (common attack-surface shape).
+    vm.prank(ownerAddr);
+    wl.addValidator(compliance);
+    assertTrue(wl.isValidator(compliance));
+    assertTrue(wl.isComplianceOfficer(compliance));
+
+    vm.prank(ownerAddr);
+    wl.revokeAllRoles(compliance);
+
+    assertFalse(wl.isValidator(compliance));
+    assertFalse(wl.isComplianceOfficer(compliance));
+  }
+
+  function testRevokeAllRolesSilentOnMissingRoles() public {
+    address bystander = makeAddr("bystander");
+    vm.prank(ownerAddr);
+    wl.revokeAllRoles(bystander); // no-op; must not revert
+    assertFalse(wl.isValidator(bystander));
+    assertFalse(wl.isComplianceOfficer(bystander));
+  }
+
+  function testRevokeAllRolesOnlyOwner() public {
+    vm.expectRevert(Ownable.Unauthorized.selector);
+    wl.revokeAllRoles(v0.addr);
+  }
+
+  function testRevokeAllRolesRespectsQuorumFloor() public {
+    // With length = 3 and quorum = 2, revoking any validator role
+    // would drop length to 2 and violate `quorum < length`.
+    vm.prank(ownerAddr);
+    vm.expectRevert(WhitelistErrors.QuorumOutOfRange.selector);
+    wl.revokeAllRoles(v2.addr);
   }
 
   // ---------- unwhitelist ---------------------------------------------------
@@ -353,7 +488,7 @@ contract RequestWhitelistTest is Test {
     vm.prank(stranger);
     wl.unwhitelist(targets, deadline, sigs);
 
-    assertFalse(wl.isWhitelisted(t0));
+    assertFalse(_listed(t0));
   }
 
   function testUnwhitelistRevertsWhenPaused() public {
@@ -376,25 +511,32 @@ contract RequestWhitelistTest is Test {
 
   function testPauseMasksReads() public {
     _whitelistAsOwner(t0);
-    assertTrue(wl.isWhitelisted(t0));
+    assertTrue(_listed(t0));
 
     vm.prank(compliance);
     wl.pauseFor(1 days);
-    assertFalse(wl.isWhitelisted(t0));
+    assertFalse(_listed(t0));
     assertTrue(wl.isPaused());
 
     vm.warp(block.timestamp + 1 days + 1);
-    assertTrue(wl.isWhitelisted(t0));
+    assertTrue(_listed(t0));
     assertFalse(wl.isPaused());
   }
 
-  function testPauseIsExtendOnly() public {
+  function testPauseShorterDurationReverts() public {
     vm.startPrank(compliance);
     wl.pauseFor(10 days);
     uint48 longUntil = wl.pausedUntil();
-    wl.pauseFor(1 days); // smaller — no-op
-    assertEq(wl.pausedUntil(), longUntil);
+    vm.expectRevert(WhitelistErrors.PauseNotExtended.selector);
+    wl.pauseFor(1 days); // smaller — now reverts instead of silent no-op
     vm.stopPrank();
+    assertEq(wl.pausedUntil(), longUntil);
+  }
+
+  function testPauseForZeroReverts() public {
+    vm.prank(compliance);
+    vm.expectRevert(WhitelistErrors.PauseNotExtended.selector);
+    wl.pauseFor(0);
   }
 
   function testUnpauseClearsTimer() public {
@@ -456,27 +598,69 @@ contract RequestWhitelistTest is Test {
     address stranger = makeAddr("stranger");
     vm.prank(stranger);
     wl.whitelist(targets, deadline, sigs);
-    assertTrue(wl.isWhitelisted(t0));
+    assertTrue(_listed(t0));
   }
 
   // ---------- admin mutations under invariants ------------------------------
 
-  function testRemoveValidatorBelowQuorumReverts() public {
-    vm.startPrank(ownerAddr);
-    wl.removeValidator(v2.addr);
+  function testRemoveValidatorAtQuorumReverts() public {
+    // Under the strict `quorum < length` invariant, removing v2 from the
+    // initial 3-validator / quorum-2 set would leave length = quorum,
+    // violating the invariant. Must revert — the operator has to lower
+    // quorum first (or add another validator) before pruning.
+    vm.prank(ownerAddr);
     vm.expectRevert(WhitelistErrors.QuorumOutOfRange.selector);
-    wl.removeValidator(v1.addr); // would leave 1 < quorum 2
-    vm.stopPrank();
+    wl.removeValidator(v2.addr);
   }
 
-  function testRemoveValidatorLeavesNonceUntouched() public {
+  /// @dev H-3 fix via the bitmap nonce model: removing a validator
+  ///      saturates their floor to `type(uint256).max` so any
+  ///      pre-signed sig at any reasonable nonce becomes
+  ///      `NonceBelowFloor` thereafter. Combined with
+  ///      `setValidatorNonce`'s strict-increase rule, re-admitting the
+  ///      same address yields a permanently unusable key — operators
+  ///      wanting to rotate must use a new address.
+  function testRemoveValidatorBurnsNonceFloor() public {
     vm.prank(v2.addr);
     wl.setValidatorNonce(7);
 
+    // Pad the set so removing v2 doesn't violate the strict
+    // `quorum < length` invariant.
+    vm.prank(ownerAddr);
+    wl.addValidator(makeAddr("padding"));
     vm.prank(ownerAddr);
     wl.removeValidator(v2.addr);
 
-    assertEq(wl.validatorNonce(v2.addr), 7);
+    assertEq(wl.validatorNonceFloor(v2.addr), type(uint256).max);
+  }
+
+  function testReAddingRemovedValidatorCannotReplayOldSigs() public {
+    // v2 signs an unwhitelist at a low nonce, holds it in the mempool.
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    uint256 deadline = block.timestamp + 1 hours;
+    QuorumSigLib.Sig memory leaked = _signUnwhitelistWithNonce(v2, targets, deadline, 0);
+
+    // Pad and remove v2.
+    vm.prank(ownerAddr);
+    wl.addValidator(makeAddr("padding"));
+    vm.prank(ownerAddr);
+    wl.removeValidator(v2.addr);
+
+    // Operator re-admits v2 at the same address (an anti-pattern we
+    // explicitly do not want to make safe — this test codifies that
+    // the leaked sig is *not* replayable).
+    vm.prank(ownerAddr);
+    wl.addValidator(v2.addr);
+
+    // Even though v2 is a validator again, the floor is still
+    // saturated, so every leaked sig below `type(uint256).max` is
+    // rejected.
+    QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
+    sigs[0] = _signUnwhitelist(v0, targets, deadline);
+    sigs[1] = leaked;
+    vm.expectRevert(QuorumSigLib.NonceBelowFloor.selector);
+    wl.unwhitelist(targets, deadline, sigs);
   }
 
   function testAddValidatorDuplicateReverts() public {
@@ -502,17 +686,17 @@ contract RequestWhitelistTest is Test {
     uint256 deadline = block.timestamp + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
-    sigs[0] = _signWhitelist(v0, targets, deadline);
-    sigs[1] = _signWhitelist(v1, targets, deadline);
+    sigs[0] = _signWhitelistWithNonce(v0, targets, deadline, 0);
+    sigs[1] = _signWhitelistWithNonce(v1, targets, deadline, 0);
 
     vm.prank(ownerAddr);
     wl.whitelist(targets, deadline, sigs);
 
-    assertEq(wl.validatorNonce(v0.addr), 1, "v0 nonce consumed");
-    assertEq(wl.validatorNonce(v1.addr), 1, "v1 nonce consumed");
+    assertTrue(wl.isNonceConsumed(v0.addr, 0), "v0 nonce consumed");
+    assertTrue(wl.isNonceConsumed(v1.addr, 0), "v1 nonce consumed");
 
     vm.prank(ownerAddr);
-    vm.expectRevert(QuorumSigLib.NonceMismatch.selector);
+    vm.expectRevert(QuorumSigLib.NonceConsumed.selector);
     wl.whitelist(targets, deadline, sigs);
   }
 
@@ -530,48 +714,77 @@ contract RequestWhitelistTest is Test {
     address stranger = makeAddr("stranger");
     vm.prank(stranger);
     wl.unwhitelist(targets, deadline, unsigs);
-    assertFalse(wl.isWhitelisted(t0));
+    assertFalse(_listed(t0));
 
     QuorumSigLib.Sig[] memory reWhitelist = new QuorumSigLib.Sig[](2);
     reWhitelist[0] = _signWhitelist(v0, targets, deadline);
     reWhitelist[1] = _signWhitelist(v1, targets, deadline);
     vm.prank(ownerAddr);
     wl.whitelist(targets, deadline, reWhitelist);
-    assertTrue(wl.isWhitelisted(t0));
+    assertTrue(_listed(t0));
 
     vm.prank(stranger);
-    vm.expectRevert(QuorumSigLib.NonceMismatch.selector);
+    vm.expectRevert(QuorumSigLib.NonceConsumed.selector);
     wl.unwhitelist(targets, deadline, unsigs);
 
-    assertTrue(wl.isWhitelisted(t0));
+    assertTrue(_listed(t0));
   }
 
-  function testSequentialSigsMustBeConsumedInOrder() public {
+  /// @dev M-4 fix: with the bitmap nonce model, sigs can be submitted
+  ///      in any order. A batch at nonce 5 can be consumed before a
+  ///      batch at nonce 3; each remains single-use.
+  function testSigsConsumableInAnyOrder() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
     uint256 deadline = block.timestamp + 1 hours;
 
-    // Pre-signed at nonce 1 while on-chain nonces are 0 — out-of-order.
-    QuorumSigLib.Sig[] memory sigsN1 = new QuorumSigLib.Sig[](2);
-    sigsN1[0] = _signWhitelistWithNonce(v0, targets, deadline, 1);
-    sigsN1[1] = _signWhitelistWithNonce(v1, targets, deadline, 1);
+    // Three independent batches, each signed at a distinct nonce.
+    QuorumSigLib.Sig[] memory batchAt5 = new QuorumSigLib.Sig[](2);
+    batchAt5[0] = _signWhitelistWithNonce(v0, targets, deadline, 5);
+    batchAt5[1] = _signWhitelistWithNonce(v1, targets, deadline, 5);
+
+    QuorumSigLib.Sig[] memory batchAt3 = new QuorumSigLib.Sig[](2);
+    batchAt3[0] = _signWhitelistWithNonce(v0, targets, deadline, 3);
+    batchAt3[1] = _signWhitelistWithNonce(v1, targets, deadline, 3);
+
+    QuorumSigLib.Sig[] memory batchAt7 = new QuorumSigLib.Sig[](2);
+    batchAt7[0] = _signWhitelistWithNonce(v0, targets, deadline, 7);
+    batchAt7[1] = _signWhitelistWithNonce(v1, targets, deadline, 7);
+
+    // Submit 5 first — passes.
+    vm.prank(ownerAddr);
+    wl.whitelist(targets, deadline, batchAt5);
+    assertTrue(wl.isNonceConsumed(v0.addr, 5));
+
+    // Then 3 — also passes (would have been NonceMismatch in the old model).
+    vm.prank(ownerAddr);
+    wl.whitelist(targets, deadline, batchAt3);
+    assertTrue(wl.isNonceConsumed(v0.addr, 3));
+
+    // Finally 7 — passes. Gaps at 0, 1, 2, 4, 6 remain available for
+    // other in-flight sigs, demonstrating that any nonce allocation
+    // pattern (sequential, sparse, time-based) is valid.
+    vm.prank(ownerAddr);
+    wl.whitelist(targets, deadline, batchAt7);
+    assertTrue(wl.isNonceConsumed(v0.addr, 7));
+    assertFalse(wl.isNonceConsumed(v0.addr, 4));
+  }
+
+  /// @dev Within a single call the same sig cannot be credited twice;
+  ///      the call-local dedup fires on the second occurrence.
+  function testSameNonceTwiceInOneCallReverts() public {
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    uint256 deadline = block.timestamp + 1 hours;
+
+    QuorumSigLib.Sig memory v0Sig = _signWhitelistWithNonce(v0, targets, deadline, 0);
+    QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
+    sigs[0] = v0Sig;
+    sigs[1] = v0Sig; // same validator, same nonce
 
     vm.prank(ownerAddr);
-    vm.expectRevert(QuorumSigLib.NonceMismatch.selector);
-    wl.whitelist(targets, deadline, sigsN1);
-
-    // Consuming nonce 0 first unblocks the nonce-1 batch.
-    QuorumSigLib.Sig[] memory sigsN0 = new QuorumSigLib.Sig[](2);
-    sigsN0[0] = _signWhitelistWithNonce(v0, targets, deadline, 0);
-    sigsN0[1] = _signWhitelistWithNonce(v1, targets, deadline, 0);
-    vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, sigsN0);
-
-    vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, sigsN1);
-
-    assertEq(wl.validatorNonce(v0.addr), 2);
-    assertEq(wl.validatorNonce(v1.addr), 2);
+    vm.expectRevert(QuorumSigLib.DuplicateSignature.selector);
+    wl.whitelist(targets, deadline, sigs);
   }
 
   // ---------- NM-003: admin *BySig sig replay is rejected -------------------
@@ -590,7 +803,7 @@ contract RequestWhitelistTest is Test {
     wl.removeValidatorBySig(fresh, deadline, removeSigs);
     assertFalse(wl.isValidator(fresh));
 
-    vm.expectRevert(QuorumSigLib.NonceMismatch.selector);
+    vm.expectRevert(QuorumSigLib.NonceConsumed.selector);
     wl.addValidatorBySig(fresh, deadline, addSigs);
   }
 
@@ -608,7 +821,7 @@ contract RequestWhitelistTest is Test {
     wl.setComplianceOfficerBySig(attacker, false, deadline, revokeSigs);
     assertFalse(wl.isComplianceOfficer(attacker));
 
-    vm.expectRevert(QuorumSigLib.NonceMismatch.selector);
+    vm.expectRevert(QuorumSigLib.NonceConsumed.selector);
     wl.setComplianceOfficerBySig(attacker, true, deadline, addSigs);
   }
 
@@ -646,15 +859,20 @@ contract RequestWhitelistTest is Test {
     wl.setComplianceOfficer(makeAddr("co2"), true);
   }
 
-  function testPausedBlocksSetValidatorNonce() public {
+  /// @dev H-1 fix: `setValidatorNonce` must remain callable while paused,
+  ///      because the most credible reason to pause is suspected key
+  ///      compromise — exactly the scenario that needs mass-invalidation.
+  function testSetValidatorNonceWorksWhilePaused() public {
     vm.prank(compliance);
     wl.pauseFor(1 days);
     vm.prank(v0.addr);
-    vm.expectRevert(WhitelistErrors.ContractPaused.selector);
     wl.setValidatorNonce(42);
+    assertEq(wl.validatorNonceFloor(v0.addr), 42);
   }
 
-  function testPausedBlocksAddValidatorBySig() public {
+  /// @dev H-2 fix: quorum-signed admin rotation must remain reachable
+  ///      while paused. Pause freezes *whitelisting*, not *administration*.
+  function testAddValidatorBySigWorksWhilePaused() public {
     vm.prank(ownerAddr);
     wl.renounceOwnership();
     vm.prank(compliance);
@@ -663,11 +881,16 @@ contract RequestWhitelistTest is Test {
     address fresh = makeAddr("freshValidator");
     uint256 deadline = block.timestamp + 1 hours;
     QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_ADD_VALIDATOR(), abi.encode(fresh), deadline);
-    vm.expectRevert(WhitelistErrors.ContractPaused.selector);
     wl.addValidatorBySig(fresh, deadline, sigs);
+    assertTrue(wl.isValidator(fresh));
   }
 
-  function testPausedBlocksRemoveValidatorBySig() public {
+  function testRemoveValidatorBySigWorksWhilePaused() public {
+    // Add a fresh validator first so the set is big enough to prune v2
+    // under the strict `quorum < length` invariant.
+    vm.prank(ownerAddr);
+    wl.addValidator(makeAddr("padding"));
+
     vm.prank(ownerAddr);
     wl.renounceOwnership();
     vm.prank(compliance);
@@ -675,45 +898,51 @@ contract RequestWhitelistTest is Test {
 
     uint256 deadline = block.timestamp + 1 hours;
     QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_REMOVE_VALIDATOR(), abi.encode(v2.addr), deadline);
-    vm.expectRevert(WhitelistErrors.ContractPaused.selector);
     wl.removeValidatorBySig(v2.addr, deadline, sigs);
+    assertFalse(wl.isValidator(v2.addr));
   }
 
-  function testPausedBlocksSetQuorumBySig() public {
+  function testSetQuorumBySigWorksWhilePaused() public {
     vm.prank(ownerAddr);
     wl.renounceOwnership();
     vm.prank(compliance);
     wl.pauseFor(1 days);
 
     uint256 deadline = block.timestamp + 1 hours;
-    QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_SET_QUORUM(), abi.encode(uint16(3)), deadline);
-    vm.expectRevert(WhitelistErrors.ContractPaused.selector);
-    wl.setQuorumBySig(3, deadline, sigs);
+    QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_SET_QUORUM(), abi.encode(uint16(1)), deadline);
+    wl.setQuorumBySig(1, deadline, sigs);
+    assertEq(wl.quorum(), 1);
   }
 
-  /// @dev The NM-001 headline defeat path: compliance-officer swap via
-  ///      `*BySig` while paused is what allowed unpausing the circuit
-  ///      breaker. It must now revert before touching any state.
-  function testPausedBlocksComplianceOfficerSwapDefeat() public {
+  /// @dev H-2 fix: the quorum must be able to rotate out a rogue
+  ///      compliance officer via `*BySig` even while the officer has the
+  ///      registry paused. Without this, a rogue officer calling
+  ///      `pauseFor(max)` would permanently lock the registry because
+  ///      `setComplianceOfficerBySig` would itself be `whenNotPaused`.
+  function testComplianceOfficerRotationWorksWhilePaused() public {
     vm.prank(ownerAddr);
     wl.renounceOwnership();
     vm.prank(compliance);
     wl.pauseFor(10 days);
     assertTrue(wl.isPaused());
 
-    address attacker = makeAddr("attacker");
+    address newOfficer = makeAddr("newOfficer");
     uint256 deadline = block.timestamp + 1 hours;
-    QuorumSigLib.Sig[] memory swapIn = _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(attacker, true), deadline);
-    vm.expectRevert(WhitelistErrors.ContractPaused.selector);
-    wl.setComplianceOfficerBySig(attacker, true, deadline, swapIn);
+    QuorumSigLib.Sig[] memory swapIn =
+      _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(newOfficer, true), deadline);
+    wl.setComplianceOfficerBySig(newOfficer, true, deadline, swapIn);
 
-    QuorumSigLib.Sig[] memory swapOut = _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(compliance, false), deadline);
-    vm.expectRevert(WhitelistErrors.ContractPaused.selector);
+    QuorumSigLib.Sig[] memory swapOut =
+      _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(compliance, false), deadline);
     wl.setComplianceOfficerBySig(compliance, false, deadline, swapOut);
 
-    // Original compliance officer keeps the keys to the cell.
-    assertTrue(wl.isComplianceOfficer(compliance));
-    assertFalse(wl.isComplianceOfficer(attacker));
+    assertFalse(wl.isComplianceOfficer(compliance));
+    assertTrue(wl.isComplianceOfficer(newOfficer));
+
+    // Fresh officer unpauses to fully recover the registry.
+    vm.prank(newOfficer);
+    wl.unpause();
+    assertFalse(wl.isPaused());
   }
 
   function testPauseForExtendableDuringPause() public {
@@ -750,6 +979,14 @@ contract RequestWhitelistTest is Test {
 
   // ---------- helpers -------------------------------------------------------
 
+  /// @dev Returns true iff `a` is in the trusted `Whitelisted` state —
+  ///      i.e. attested AND the registry is not paused. Wraps the enum
+  ///      return type of `IWhitelist.isWhitelisted` so the existing
+  ///      assertions read the same as before the L-5 fix.
+  function _listed(address a) internal view returns (bool) {
+    return wl.isWhitelisted(a) == IWhitelist.WhitelistStatus.Whitelisted;
+  }
+
   function _whitelistAsOwner(address target) internal {
     address[] memory targets = new address[](1);
     targets[0] = target;
@@ -761,12 +998,23 @@ contract RequestWhitelistTest is Test {
     wl.whitelist(targets, deadline, sigs);
   }
 
+  /// @dev Picks the next nonce for validator `v`: max of the on-chain
+  ///      floor and the suite's local cursor, then advances the cursor.
+  ///      Tests that raise the floor via `setValidatorNonce` automatically
+  ///      get sigs at or above the new floor on the next helper call.
+  function _pickNonce(address v) internal returns (uint256) {
+    uint256 floor = wl.validatorNonceFloor(v);
+    uint256 n = _nextNonce[v];
+    if (n < floor) n = floor;
+    _nextNonce[v] = n + 1;
+    return n;
+  }
+
   function _signWhitelist(Vm.Wallet memory w, address[] memory targets, uint256 deadline)
     internal
-    view
     returns (QuorumSigLib.Sig memory)
   {
-    return _signWhitelistWithNonce(w, targets, deadline, wl.validatorNonce(w.addr));
+    return _signWhitelistWithNonce(w, targets, deadline, _pickNonce(w.addr));
   }
 
   function _signWhitelistWithNonce(Vm.Wallet memory w, address[] memory targets, uint256 deadline, uint256 nonce)
@@ -781,10 +1029,16 @@ contract RequestWhitelistTest is Test {
 
   function _signUnwhitelist(Vm.Wallet memory w, address[] memory targets, uint256 deadline)
     internal
+    returns (QuorumSigLib.Sig memory)
+  {
+    return _signUnwhitelistWithNonce(w, targets, deadline, _pickNonce(w.addr));
+  }
+
+  function _signUnwhitelistWithNonce(Vm.Wallet memory w, address[] memory targets, uint256 deadline, uint256 nonce)
+    internal
     view
     returns (QuorumSigLib.Sig memory)
   {
-    uint256 nonce = wl.validatorNonce(w.addr);
     bytes32 structHash =
       keccak256(abi.encode(UNWHITELIST_TYPEHASH, _hashAddressArray(targets), deadline, w.addr, nonce));
     bytes32 digest = _toTypedDataHash(structHash);
@@ -794,7 +1048,6 @@ contract RequestWhitelistTest is Test {
 
   function _signAdmin(bytes32 actionId, bytes memory data, uint256 deadline)
     internal
-    view
     returns (QuorumSigLib.Sig[] memory out)
   {
     out = new QuorumSigLib.Sig[](2);
@@ -804,10 +1057,9 @@ contract RequestWhitelistTest is Test {
 
   function _signAdminFor(Vm.Wallet memory w, bytes32 actionId, bytes memory data, uint256 deadline)
     internal
-    view
     returns (QuorumSigLib.Sig memory)
   {
-    uint256 nonce = wl.validatorNonce(w.addr);
+    uint256 nonce = _pickNonce(w.addr);
     bytes32 structHash = keccak256(abi.encode(ADMIN_TYPEHASH, actionId, keccak256(data), deadline, w.addr, nonce));
     bytes32 digest = _toTypedDataHash(structHash);
     (uint8 vv, bytes32 r, bytes32 s) = vm.sign(w, digest);

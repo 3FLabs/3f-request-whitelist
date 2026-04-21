@@ -18,8 +18,20 @@ library WhitelistErrors {
   error NotOwnerWhileOwned();
 
   /// @notice Reverts when a validator calls `setValidatorNonce` with a
-  ///         non-strictly-increasing value.
+  ///         non-strictly-increasing value. The nonce floor can only
+  ///         move forward — shrinking it would re-expose previously
+  ///         invalidated signatures.
   error NewNonceNotIncreasing();
+
+  /// @notice Reverts when `pauseFor` would not strictly extend the
+  ///         current pause window (e.g. `pauseFor(0)` or a duration
+  ///         smaller than the remaining pause).
+  error PauseNotExtended();
+
+  /// @notice Reverts when `setQuorum` / `setQuorumBySig` is called with
+  ///         the current quorum value. Refused so quorum-sig submitters
+  ///         can't spend a validator nonce batch on a no-op.
+  error QuorumUnchanged();
 
   /// @notice Reverts from a `*BySig` admin path while the owner is still
   ///         set — those paths are only available after renouncement.

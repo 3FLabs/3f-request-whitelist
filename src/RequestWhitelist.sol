@@ -17,10 +17,11 @@ import {WhitelistEvents} from "./lib/WhitelistEvents.sol";
 ///         consumers call `isWhitelisted(address)` (see `IWhitelist`) as the
 ///         single source of truth. A compliance role can freeze the
 ///         registry for a bounded window; while frozen, `isWhitelisted`
-///         returns `false` for every address and every state-changing call
-///         reverts with `ContractPaused` — with the sole exceptions of
-///         `pauseFor` (extend the freeze) and `unpause` (cancel it), both
-///         of which remain callable by compliance officers.
+///         reports one of the `Paused*` variants — never `Whitelisted` —
+///         and every whitelisting call (`whitelist`, `unwhitelist`) reverts
+///         with `ContractPaused`. Validator / compliance / quorum rotation
+///         paths remain reachable during pause so the circuit breaker
+///         cannot lock out the recovery it was built to enable.
 ///
 ///         The contract is factory- and proxy-agnostic: deploy the
 ///         implementation once, put it behind any ERC-1967 proxy, and call
@@ -51,13 +52,29 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
   ///      future flags added in later versions. Dynamic members (the set
   ///      and the mappings) each anchor their own base slot and therefore
   ///      don't perturb slot 0 when they grow.
+  ///
+  ///      Nonce accounting (see `QuorumSigLib`):
+  ///        - `validatorNonceFloor[v]` — every sig at a nonce below this
+  ///          value is rejected `NonceBelowFloor`. Raised by the
+  ///          validator themselves via `setValidatorNonce` as the
+  ///          mass-invalidate lever, and forced to `type(uint256).max`
+  ///          in `_removeValidator` so that removal permanently burns
+  ///          the nonce space for that address (closes the re-add
+  ///          replay window).
+  ///        - `validatorNonceBitmap[v][word]` — packed 256-bit word of
+  ///          consumed nonces; bit `n & 0xff` of word `n >> 8` is set
+  ///          once nonce `n` has been successfully verified for
+  ///          validator `v`. Sigs can therefore be submitted in any
+  ///          order, each is single-use, and two submitters racing the
+  ///          same nonce produce one `ok` and one `NonceConsumed`.
   struct Layout {
     uint16 quorum; // minimum number of distinct validator sigs required
     uint48 pausedUntil; // unix seconds; 0 == not paused
     EnumerableSetLib.AddressSet validators;
-    mapping(address => uint256) validatorNonce;
+    mapping(address => uint256) validatorNonceFloor;
     mapping(address => bool) isComplianceOfficer;
     mapping(address => bool) _isWhitelisted;
+    mapping(address => mapping(uint256 => uint256)) validatorNonceBitmap;
   }
 
   // keccak256(abi.encode(uint256(keccak256("3f.storage.RequestWhitelist")) - 1)) & ~bytes32(uint256(0xff))
@@ -197,11 +214,26 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
     return _getStorage().quorum;
   }
 
-  /// @notice Current on-chain nonce for `v`. Signatures with any other
-  ///         nonce are rejected.
+  /// @notice Current nonce floor for `v`. Signatures at a nonce strictly
+  ///         below this value are rejected `NonceBelowFloor`. The floor
+  ///         is the mass-invalidate lever — validators raise it via
+  ///         `setValidatorNonce`, and `_removeValidator` saturates it to
+  ///         `type(uint256).max` to permanently burn the nonce space
+  ///         for a removed address.
   /// @param  v The validator address.
-  function validatorNonce(address v) external view returns (uint256) {
-    return _getStorage().validatorNonce[v];
+  function validatorNonceFloor(address v) external view returns (uint256) {
+    return _getStorage().validatorNonceFloor[v];
+  }
+
+  /// @notice Whether nonce `n` has already been consumed by `v`. True
+  ///         iff bit `n & 0xff` of word `n >> 8` in `v`'s bitmap is
+  ///         set. Does not consider the floor — a nonce below the
+  ///         current floor reads `false` here even though any sig at
+  ///         that nonce is unusable.
+  /// @param  v The validator address.
+  /// @param  n The nonce to inspect.
+  function isNonceConsumed(address v, uint256 n) external view returns (bool) {
+    return _getStorage().validatorNonceBitmap[v][n >> 8] & (1 << (n & 0xff)) != 0;
   }
 
   /// @notice True iff `a` can currently pause or unpause the registry.
@@ -212,12 +244,17 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
 
   /// @inheritdoc IWhitelist
   /// @dev    While `block.timestamp < pausedUntil` the function returns
-  ///         `false` even for previously-whitelisted targets; this is the
-  ///         circuit-breaker guarantee the operator relies on.
-  function isWhitelisted(address a) external view returns (bool) {
+  ///         one of the paused variants even for previously-whitelisted
+  ///         targets; this is the circuit-breaker guarantee the operator
+  ///         relies on. Integrators must treat anything other than
+  ///         `WhitelistStatus.Whitelisted` as "do not authorise".
+  function isWhitelisted(address a) external view returns (WhitelistStatus) {
     Layout storage $ = _getStorage();
-    if (block.timestamp < $.pausedUntil) return false;
-    return $._isWhitelisted[a];
+    bool listed = $._isWhitelisted[a];
+    if (block.timestamp < $.pausedUntil) {
+      return listed ? WhitelistStatus.PausedWhitelisted : WhitelistStatus.PausedNotWhitelisted;
+    }
+    return listed ? WhitelistStatus.Whitelisted : WhitelistStatus.NotWhitelisted;
   }
 
   /// @notice Unix timestamp at which the current pause (if any) ends.
@@ -280,9 +317,12 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
   }
 
   /// @notice Extends the pause by at least `secondsDuration` seconds.
-  /// @dev    Extend-only: a smaller duration than the remaining pause is a
-  ///         no-op. Cannot shorten a pause (use `unpause` instead).
-  ///         `block.timestamp + secondsDuration` saturates at `uint48.max`.
+  /// @dev    Extend-only: reverts `PauseNotExtended` on any call that
+  ///         would not strictly extend the current pause window (e.g.
+  ///         `pauseFor(0)`, or a duration shorter than the remaining
+  ///         pause). Cannot shorten a pause (use `unpause` instead).
+  ///         `block.timestamp + secondsDuration` saturates at
+  ///         `uint48.max`.
   /// @param  secondsDuration Seconds to add on top of `block.timestamp`.
   function pauseFor(uint256 secondsDuration) external onlyCompliance {
     Layout storage $ = _getStorage();
@@ -292,10 +332,15 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
         ? type(uint48).max
         : block.timestamp + secondsDuration;
     }
-    if (newUntil > $.pausedUntil) {
-      $.pausedUntil = uint48(newUntil);
-      emit WhitelistEvents.Paused(uint48(newUntil));
+    // Revert on any call that wouldn't produce an actually-paused state
+    // strictly beyond the current `pausedUntil`. Covers both `pauseFor(0)`
+    // (newUntil == block.timestamp, so `whenNotPaused` wouldn't even
+    // fire) and any duration shorter than the remaining pause.
+    if (newUntil <= block.timestamp || newUntil <= $.pausedUntil) {
+      revert WhitelistErrors.PauseNotExtended();
     }
+    $.pausedUntil = uint48(newUntil);
+    emit WhitelistEvents.Paused(uint48(newUntil));
   }
 
   /// @notice Cancels the current pause immediately. Complements the
@@ -309,23 +354,29 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
     }
   }
 
-  /// @notice A validator jumps their own nonce forward to invalidate every
-  ///         outstanding signature they previously produced. The per-sig
-  ///         nonce-consume in `QuorumSigLib.assertSigValid` already
-  ///         advances the nonce by one on each use; this call is the
-  ///         mass-invalidate lever when a key is suspected compromised or
-  ///         the validator wants to cancel a queue of pre-signed sigs in
-  ///         bulk.
-  /// @dev    The new value must be strictly greater than the current one so
-  ///         accidental rewrites can't weaken the invariant. The caller
-  ///         must currently be a validator.
-  /// @param  newNonce The replacement nonce value.
-  function setValidatorNonce(uint256 newNonce) external whenNotPaused {
+  /// @notice A validator raises their own nonce floor. Every signature
+  ///         they have previously produced at a nonce strictly below
+  ///         the new floor becomes unusable — submitters will see
+  ///         `NonceBelowFloor`. This is the mass-invalidate lever when
+  ///         a key is suspected compromised or the validator wants to
+  ///         cancel a queue of pre-signed sigs in bulk.
+  /// @dev    Not `whenNotPaused`: a validator who suspects key
+  ///         compromise must be able to self-invalidate their sigs
+  ///         even while the registry is paused — pausing is the signal
+  ///         that something is wrong, not a reason to freeze recovery.
+  ///         The new value must be strictly greater than the current
+  ///         one; the floor can only move forward so an accidental
+  ///         rewrite cannot re-expose previously invalidated
+  ///         signatures. The caller must currently be a validator.
+  /// @param  newFloor The new nonce floor. Sigs at nonces strictly
+  ///                  below `newFloor` are rejected `NonceBelowFloor`
+  ///                  thereafter.
+  function setValidatorNonce(uint256 newFloor) external {
     Layout storage $ = _getStorage();
     if (!$.validators.contains(msg.sender)) revert QuorumSigLib.NotValidator();
-    if (newNonce <= $.validatorNonce[msg.sender]) revert WhitelistErrors.NewNonceNotIncreasing();
-    $.validatorNonce[msg.sender] = newNonce;
-    emit WhitelistEvents.ValidatorNonceSet(msg.sender, newNonce);
+    if (newFloor <= $.validatorNonceFloor[msg.sender]) revert WhitelistErrors.NewNonceNotIncreasing();
+    $.validatorNonceFloor[msg.sender] = newFloor;
+    emit WhitelistEvents.ValidatorNonceSet(msg.sender, newFloor);
   }
 
   // ----- Admin: owner path --------------------------------------------------
@@ -361,14 +412,46 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
     _setComplianceOfficer(_getStorage(), a, on);
   }
 
+  /// @notice Strips both the validator role and the compliance-officer
+  ///         role from `a` in a single call. Incident-response tool for
+  ///         the common case where the same address wears both hats
+  ///         and rotating them separately leaves an exploitable window
+  ///         where the attacker still holds one role.
+  /// @dev    Owner-only; available only in Phase 1. Post-renounce,
+  ///         operators combine `removeValidatorBySig` with
+  ///         `setComplianceOfficerBySig(a, false)`. Silently skips
+  ///         either role if `a` does not currently hold it — the goal
+  ///         is a clean "remove everything" op, not per-role
+  ///         precision. When the validator role is present, behaves
+  ///         identically to `removeValidator` (including saturating
+  ///         the nonce floor to `type(uint256).max`).
+  /// @param  a The address to fully revoke.
+  function revokeAllRoles(address a) external onlyOwner {
+    Layout storage $ = _getStorage();
+    if ($.validators.remove(a)) {
+      if ($.validators.length() <= $.quorum) revert WhitelistErrors.QuorumOutOfRange();
+      $.validatorNonceFloor[a] = type(uint256).max;
+      emit WhitelistEvents.ValidatorRemoved(a);
+      emit WhitelistEvents.ValidatorNonceSet(a, type(uint256).max);
+    }
+    if ($.isComplianceOfficer[a]) {
+      $.isComplianceOfficer[a] = false;
+      emit WhitelistEvents.ComplianceOfficerSet(a, false);
+    }
+  }
+
   // ----- Admin: quorum-sig path (available only after renouncement) --------
 
   /// @notice `addValidator` via a quorum of validator signatures.
   ///         Available only after the owner has been renounced.
+  /// @dev    Not `whenNotPaused`: pause freezes *whitelisting*, not
+  ///         *administration*. The circuit breaker exists to buy the
+  ///         quorum time to rotate; blocking rotation would defeat its
+  ///         own purpose.
   /// @param  v        The validator to add.
   /// @param  deadline Deadline signed into the sigs.
   /// @param  sigs     Validator signatures covering the request.
-  function addValidatorBySig(address v, uint256 deadline, QuorumSigLib.Sig[] calldata sigs) external whenNotPaused {
+  function addValidatorBySig(address v, uint256 deadline, QuorumSigLib.Sig[] calldata sigs) external {
     _requireRenounced();
     _verifyAdminQuorum(ACTION_ADD_VALIDATOR, abi.encode(v), deadline, sigs);
     _addValidator(_getStorage(), v);
@@ -376,10 +459,11 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
 
   /// @notice `removeValidator` via a quorum of validator signatures.
   ///         Available only after the owner has been renounced.
+  /// @dev    Not `whenNotPaused`; see `addValidatorBySig` for rationale.
   /// @param  v        The validator to remove.
   /// @param  deadline Deadline signed into the sigs.
   /// @param  sigs     Validator signatures covering the request.
-  function removeValidatorBySig(address v, uint256 deadline, QuorumSigLib.Sig[] calldata sigs) external whenNotPaused {
+  function removeValidatorBySig(address v, uint256 deadline, QuorumSigLib.Sig[] calldata sigs) external {
     _requireRenounced();
     _verifyAdminQuorum(ACTION_REMOVE_VALIDATOR, abi.encode(v), deadline, sigs);
     _removeValidator(_getStorage(), v);
@@ -387,10 +471,11 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
 
   /// @notice `setQuorum` via a quorum of validator signatures.
   ///         Available only after the owner has been renounced.
+  /// @dev    Not `whenNotPaused`; see `addValidatorBySig` for rationale.
   /// @param  q        The new quorum.
   /// @param  deadline Deadline signed into the sigs.
   /// @param  sigs     Validator signatures covering the request.
-  function setQuorumBySig(uint16 q, uint256 deadline, QuorumSigLib.Sig[] calldata sigs) external whenNotPaused {
+  function setQuorumBySig(uint16 q, uint256 deadline, QuorumSigLib.Sig[] calldata sigs) external {
     _requireRenounced();
     _verifyAdminQuorum(ACTION_SET_QUORUM, abi.encode(q), deadline, sigs);
     _setQuorum(_getStorage(), q);
@@ -398,13 +483,16 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
 
   /// @notice `setComplianceOfficer` via a quorum of validator signatures.
   ///         Available only after the owner has been renounced.
+  /// @dev    Not `whenNotPaused`; without this escape hatch, a rogue
+  ///         compliance officer calling `pauseFor(max)` could otherwise
+  ///         lock the registry forever because the quorum would have no
+  ///         way to swap them out.
   /// @param  a        The address whose compliance flag to flip.
   /// @param  on       The new flag value.
   /// @param  deadline Deadline signed into the sigs.
   /// @param  sigs     Validator signatures covering the request.
   function setComplianceOfficerBySig(address a, bool on, uint256 deadline, QuorumSigLib.Sig[] calldata sigs)
     external
-    whenNotPaused
   {
     _requireRenounced();
     _verifyAdminQuorum(ACTION_SET_COMPLIANCE, abi.encode(a, on), deadline, sigs);
@@ -489,7 +577,9 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
     for (uint256 i; i < sigs.length; ++i) {
       QuorumSigLib.Sig calldata s = sigs[i];
       bytes32 structHash = keccak256(abi.encode(typehash, targetsHash, deadline, s.validator, s.nonce));
-      seen = QuorumSigLib.assertSigValid($.validators, $.validatorNonce, _hashTypedData(structHash), s, seen);
+      seen = QuorumSigLib.assertSigValid(
+        $.validators, $.validatorNonceFloor, $.validatorNonceBitmap, _hashTypedData(structHash), s, seen
+      );
     }
   }
 
@@ -508,7 +598,9 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
     for (uint256 i; i < sigs.length; ++i) {
       QuorumSigLib.Sig calldata s = sigs[i];
       bytes32 structHash = keccak256(abi.encode(_ADMIN_TYPEHASH, actionId, dataHash, deadline, s.validator, s.nonce));
-      seen = QuorumSigLib.assertSigValid($.validators, $.validatorNonce, _hashTypedData(structHash), s, seen);
+      seen = QuorumSigLib.assertSigValid(
+        $.validators, $.validatorNonceFloor, $.validatorNonceBitmap, _hashTypedData(structHash), s, seen
+      );
     }
   }
 
@@ -525,22 +617,38 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
   }
 
   /// @dev Shared remove-validator logic.
-  ///      Reverts if `v` isn't a validator, or if removing it would leave
-  ///      the set below quorum (which would silently brick whitelisting).
-  ///      The validator's nonce is left untouched — while removed, their
-  ///      sigs fail the membership check anyway. If an admin re-adds them
-  ///      later and wants to invalidate old sigs, the validator (or the
-  ///      admin, before re-adding) should bump the nonce explicitly.
+  ///      Reverts if `v` isn't a validator, or if removing it would
+  ///      leave the set at or below quorum (which would silently brick
+  ///      future removals under the strict `quorum < length`
+  ///      invariant). The validator's nonce floor is saturated to
+  ///      `type(uint256).max` so that every signature they ever
+  ///      produced — including any pre-signed sig at an un-consumed
+  ///      nonce — becomes unusable permanently. Combined with the
+  ///      bitmap's "consumed nonces stay consumed" property, this
+  ///      closes the re-add replay window: if the same address is ever
+  ///      admitted again, no sig at any reasonable nonce can pass
+  ///      `NonceBelowFloor`, and `setValidatorNonce` cannot lower the
+  ///      floor back down (strict-increase). Operators wanting to
+  ///      re-admit a previously-removed party must use a new address.
   function _removeValidator(Layout storage $, address v) private {
     if (!$.validators.remove(v)) revert QuorumSigLib.NotValidator();
-    if ($.validators.length() < $.quorum) revert WhitelistErrors.QuorumOutOfRange();
+    if ($.validators.length() <= $.quorum) revert WhitelistErrors.QuorumOutOfRange();
+    $.validatorNonceFloor[v] = type(uint256).max;
     emit WhitelistEvents.ValidatorRemoved(v);
+    emit WhitelistEvents.ValidatorNonceSet(v, type(uint256).max);
   }
 
   /// @dev Shared set-quorum logic. Enforces the invariant
-  ///      `1 <= quorum <= validators.length`.
+  ///      `1 <= quorum < validators.length`. The strict inequality
+  ///      guarantees at least one non-coalition validator is required to
+  ///      block quorum ops, so a `k`-of-`n` quorum cannot raise itself to
+  ///      `n` and brick the registry with any dissenting validator, and
+  ///      cannot iteratively shrink the set down to the coalition size.
+  ///      Reverts `QuorumUnchanged` on a same-value write so no-op calls
+  ///      don't burn validator nonces or emit misleading events.
   function _setQuorum(Layout storage $, uint16 q) private {
-    if (q == 0 || q > $.validators.length()) revert WhitelistErrors.QuorumOutOfRange();
+    if (q == 0 || q >= $.validators.length()) revert WhitelistErrors.QuorumOutOfRange();
+    if (q == $.quorum) revert WhitelistErrors.QuorumUnchanged();
     $.quorum = q;
     emit WhitelistEvents.QuorumSet(q);
   }
