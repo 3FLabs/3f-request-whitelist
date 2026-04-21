@@ -300,3 +300,132 @@ Deployment is proxy-based and **must** be atomic to close the one-shot
 3. Consumers import `IWhitelist`, call `isWhitelisted(address)` on the
    proxy address, and gate strictly on
    `status == IWhitelist.WhitelistStatus.Whitelisted`.
+
+### Deploying with `script/Deploy.s.sol`
+
+`script/Deploy.s.sol` wraps the three steps above into one atomic
+broadcast. Every artefact lives at a cross-chain-deterministic address:
+
+- **`ERC1967Factory`** is always the canonical solady address
+  `0x0000000000006396FF2a80c067f99B3d2Ab4Df24` — not a config knob the
+  caller can get wrong. If that factory is not yet deployed on the
+  target chain, the script bootstraps it via 0age's
+  `ImmutableCreate2Factory` (`0x0000000000FFe8B47B3e2130213B802212439497`)
+  with the pinned SALT/INITCODE from `ERC1967FactoryConstants`.
+- **`RequestWhitelist` implementation** is CREATE2'd through
+  `ImmutableCreate2Factory` at `IMPLEMENTATION_SALT` (default
+  `bytes32(uint256(0x3f))`). Its address is a pure function of
+  `(create2-factory, salt, creationCode)` and is therefore identical
+  on every chain that runs this script. Override the salt if you want
+  a different vanity prefix, or pass `IMPLEMENTATION` directly to
+  reuse an existing deployment.
+- **Proxy** is CREATE2'd through `ERC1967Factory` at the user-provided
+  `SALT`, initialised atomically in the same tx.
+
+The script reverts with guidance if `ImmutableCreate2Factory` itself is
+missing — a fully cold chain needs one manual bootstrap the script
+cannot do for you. It is idempotent at the artefact level: if the
+factory or the implementation already has code at its predicted
+address, that step is skipped.
+
+Required env:
+
+| Var | Type | Purpose |
+|---|---|---|
+| `SALT` | `bytes32` | CREATE2 salt for the proxy (see [Mining a vanity proxy salt](#mining-a-vanity-proxy-salt)). |
+| `PROXY_ADMIN` | `address` | ERC-1967 admin — controls upgrades, distinct from `owner()`. |
+| `OWNER` | `address` | Phase-1 application owner. |
+| `VALIDATORS` | `address[]` (comma-sep) | Initial validator set. |
+| `QUORUM` | `uint` | `1 <= QUORUM < VALIDATORS.length`. |
+
+Optional env:
+
+| Var | Type | Purpose |
+|---|---|---|
+| `IMPLEMENTATION` | `address` | Explicit impl override. Skips CREATE2 deployment entirely. |
+| `IMPLEMENTATION_SALT` | `bytes32` | CREATE2 salt for the impl. Default `0x000...003f`. Ignored if `IMPLEMENTATION` is set. |
+| `COMPLIANCE_OFFICERS` | `address[]` (comma-sep) | Empty if unset. |
+
+```shell
+SALT=0x0000000000000000000000000000000000000000....cafe \
+PROXY_ADMIN=0x... \
+OWNER=0x... \
+VALIDATORS=0xaaa,0xbbb,0xccc \
+QUORUM=2 \
+COMPLIANCE_OFFICERS=0xddd \
+forge script script/Deploy.s.sol:DeployRequestWhitelist --rpc-url <RPC> --broadcast
+```
+
+### Mining a vanity proxy salt
+
+The proxy is deployed via `factory.deployDeterministicAndCall`, which is
+a CREATE2 call keyed on `(factory, salt, initCodeHash)`. Pick a salt
+whose resulting proxy address starts with a chosen hex prefix (e.g.
+`0x3f...`) by grinding candidates offline:
+
+1. **Use the canonical factory address.** Mining is always against
+   `ERC1967FactoryConstants.ADDRESS = 0x0000000000006396FF2a80c067f99B3d2Ab4Df24`
+   — the same CREATE2 deployer on every chain. No per-chain
+   bookkeeping, no config knob.
+2. **Use the pinned `initCodeHash`.** The proxy init code embeds the
+   factory address, so the hash is fixed for the canonical factory on
+   every chain:
+   ```
+   0x4435a5963c29bc1c221d8cfc9c546a167425b5e1f4b5017cc0a0dd4ccaac27d1
+   ```
+   (Sanity-check from any chain that has the factory deployed:
+   `cast call 0x0000000000006396FF2a80c067f99B3d2Ab4Df24 "initCodeHash()(bytes32)"`.)
+3. **Mine the salt** with foundry's `cast create2` (sufficient up to
+   ~4–5 hex chars on a laptop):
+   ```shell
+   cast create2 \
+     --deployer 0x0000000000006396FF2a80c067f99B3d2Ab4Df24 \
+     --init-code-hash 0x4435a5963c29bc1c221d8cfc9c546a167425b5e1f4b5017cc0a0dd4ccaac27d1 \
+     --starts-with 3f \
+     --no-random
+   ```
+   Output includes both the mined address and the salt. The factory
+   requires the top 20 bytes of the salt to be either `address(0)` or
+   the caller of `deployDeterministic*`. **`--no-random` is
+   load-bearing**: without it, `cast create2` seeds the search with a
+   random 32-byte salt, leaving random bytes in the top 20 and causing
+   the factory to revert `SaltDoesNotStartWithCaller`. With
+   `--no-random` the search starts at `0x0…0` and increments, so the
+   top 20 bytes stay zero (permissionless claim) and the factory
+   accepts from any caller.
+
+   To bind the salt to a specific deployer EOA, replace `--no-random`
+   with `--caller <EOA>`: `cast` pins the top 20 bytes to that address
+   and grinds only the trailing 12. In that case the EOA must be the
+   actual transaction sender during both simulation (`--sender <EOA>`
+   or matching `--private-key`) and broadcast, or the factory reverts
+   with the same error.
+4. **Verify the mined salt on-chain before deploying:**
+   ```shell
+   cast call 0x0000000000006396FF2a80c067f99B3d2Ab4Df24 \
+     "predictDeterministicAddress(bytes32)(address)" <SALT> --rpc-url <RPC>
+   ```
+   must equal the address `cast create2` printed. The deploy script
+   also asserts `proxy == predictDeterministicAddress(salt)` post-deploy.
+5. **Deploy** with the mined salt:
+   ```shell
+   SALT=<mined-salt> \
+   PROXY_ADMIN=0x... \
+   OWNER=0x... \
+   VALIDATORS=0xaaa,0xbbb,0xccc \
+   QUORUM=2 \
+   COMPLIANCE_OFFICERS=0xddd \
+   IMPLEMENTATION_SALT=0x000000000000000000000000000000000000000000000000000000000000003f \
+   forge script script/Deploy.s.sol:DeployRequestWhitelist \
+     --rpc-url <RPC> \
+     --broadcast
+   ```
+   `IMPLEMENTATION_SALT` and `COMPLIANCE_OFFICERS` are optional — omit
+   them to take the defaults (`0x000...003f` and empty, respectively).
+   `IMPLEMENTATION` can be set instead to reuse an existing impl and
+   skip the CREATE2 deploy for it.
+
+For deeper prefixes (6+ hex chars) or leading-zero vanity, use a GPU
+miner such as [`create2crunch`](https://github.com/0age/create2crunch);
+it consumes the same `(deployer, initCodeHash)` inputs. Mining
+difficulty scales by `16^k` per extra hex char, so plan accordingly.
