@@ -30,6 +30,12 @@ runs = 1_024
 depth = 512
 shrink_run_limit = 20_000
 
+# Required because `.github/workflows/ci.yml` sets `FOUNDRY_PROFILE: ci`.
+# Foundry 1.6+ rejects unknown profile names with a hard error
+# (1.5 silently fell back to default). Empty body — inherits from
+# `[profile.default]`; tighten here if CI-specific knobs are wanted.
+[profile.ci]
+
 [fmt]
 tab_width = 2
 
