@@ -153,39 +153,74 @@ contract RequestWhitelistHandler is Test {
     _tag("warp", true);
   }
 
-  function h_whitelist(uint8 targetMask, uint8 sigMask, uint32 deadlineOffset) external {
+  function h_whitelistBySig(uint8 targetMask, uint8 sigMask, uint32 deadlineOffset) external {
     address[] memory targets = _pickTargets(targetMask);
     uint256 deadline = _deadlineFrom(deadlineOffset);
     QuorumSigLib.Sig[] memory sigs = _buildSigs(_WHITELIST_TH, _hashAddrArray(targets), deadline, sigMask);
 
     bool paused = wl.isPaused();
-    address submitter = wl.owner() == address(0) ? makeAddr("h-anyone") : ownerAddr;
 
-    vm.prank(submitter);
-    try wl.whitelist(targets, deadline, sigs) {
+    // The sig path is open to any submitter regardless of phase — the
+    // quorum is the access control, not the caller. Always submit from
+    // a stranger to exercise that policy.
+    vm.prank(makeAddr("h-anyone"));
+    try wl.whitelistBySig(targets, deadline, sigs) {
       _recordConsumedSigs(sigs);
-      _tag("whitelist", true);
+      _tag("whitelistBySig", true);
       // Sanity: if the tx succeeded, the registry was not paused.
-      require(!paused, "WL-1: whitelist succeeded while paused");
+      require(!paused, "WL-1: whitelistBySig succeeded while paused");
     } catch {
-      _tag("whitelist", false);
+      _tag("whitelistBySig", false);
     }
     _postUpdate();
   }
 
-  function h_unwhitelist(uint8 targetMask, uint8 sigMask, uint32 deadlineOffset) external {
+  function h_unwhitelistBySig(uint8 targetMask, uint8 sigMask, uint32 deadlineOffset) external {
     address[] memory targets = _pickTargets(targetMask);
     uint256 deadline = _deadlineFrom(deadlineOffset);
     QuorumSigLib.Sig[] memory sigs = _buildSigs(_UNWHITELIST_TH, _hashAddrArray(targets), deadline, sigMask);
 
-    bool paused = wl.isPaused();
-
-    try wl.unwhitelist(targets, deadline, sigs) {
+    // No pause assertion — `unwhitelistBySig` is intentionally callable
+    // while paused as a fail-safe so attestations can always be revoked.
+    try wl.unwhitelistBySig(targets, deadline, sigs) {
       _recordConsumedSigs(sigs);
-      _tag("unwhitelist", true);
-      require(!paused, "WL-2: unwhitelist succeeded while paused");
+      _tag("unwhitelistBySig", true);
     } catch {
-      _tag("unwhitelist", false);
+      _tag("unwhitelistBySig", false);
+    }
+    _postUpdate();
+  }
+
+  function h_whitelistDirect(uint8 targetMask) external {
+    address[] memory targets = _pickTargets(targetMask);
+    bool paused = wl.isPaused();
+    bool owned = wl.owner() != address(0);
+
+    vm.prank(ownerAddr);
+    try wl.whitelist(targets) {
+      _tag("whitelistDirect", true);
+      // Sanity: success implies (a) the registry was not paused and
+      // (b) the contract is still in Phase 1 (owner not renounced).
+      require(!paused, "WL-3: whitelist(direct) succeeded while paused");
+      require(owned, "WL-4: whitelist(direct) succeeded after renounce");
+    } catch {
+      _tag("whitelistDirect", false);
+    }
+    _postUpdate();
+  }
+
+  function h_unwhitelistDirect(uint8 targetMask) external {
+    address[] memory targets = _pickTargets(targetMask);
+    bool owned = wl.owner() != address(0);
+
+    vm.prank(ownerAddr);
+    try wl.unwhitelist(targets) {
+      _tag("unwhitelistDirect", true);
+      // No pause assertion — owner-direct unwhitelist is intentionally
+      // pause-callable. But it must still be Phase 1.
+      require(owned, "WL-5: unwhitelist(direct) succeeded after renounce");
+    } catch {
+      _tag("unwhitelistDirect", false);
     }
     _postUpdate();
   }

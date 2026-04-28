@@ -1,12 +1,19 @@
 # 3f Request Whitelist
 
-An on-chain attestation registry. A quorum of signing validators attests that
-an address is authored by this registry's operator; consumers call
-`isWhitelisted(address)` as the single source of truth. A compliance role can
-freeze the registry as a circuit breaker; while paused, `isWhitelisted` never
-returns the trusted `Whitelisted` value, but validator / quorum / compliance
-rotation paths remain reachable so the breaker cannot strand the recovery
-it was built to enable.
+An on-chain attestation registry with two parallel write paths into a
+single `isWhitelisted[a]` bit:
+
+- **Owner-direct** (`whitelist` / `unwhitelist`) — a trusted multisig
+  flips bits without signatures, as the always-available escape hatch.
+- **Quorum-signed** (`whitelistBySig` / `unwhitelistBySig`) — a quorum
+  of off-chain validators attests via EIP-712 batches; any submitter
+  can relay them. This is the distributed automation lane.
+
+Consumers call `isWhitelisted(address)` as the single source of truth.
+A compliance role can freeze the registry as a circuit breaker; while
+paused, `isWhitelisted` never returns the trusted `Whitelisted` value,
+but validator / quorum / compliance rotation paths remain reachable so
+the breaker cannot strand the recovery it was built to enable.
 
 The contract is factory- and proxy-agnostic: deploy the implementation once,
 put it behind any ERC-1967 proxy, and call `initialize` through the proxy.
@@ -16,22 +23,25 @@ put it behind any ERC-1967 proxy, and call `initialize` through the proxy.
 ```mermaid
 flowchart LR
     V["off-chain validators<br/>sign EIP-712 WhitelistRequest"]
-    S(["Owner (phase 1)<br/>/ anyone (phase 2)"])
+    O(["Owner (phase 1 only)<br/>trusted multisig"])
+    R(["any submitter<br/>(relayer / validator)"])
     C(["Compliance officer"])
     WL["RequestWhitelist<br/>isWhitelisted[a]<br/>pausedUntil"]
     D(["downstream protocols<br/>/ dApps"])
 
-    V -- "quorum of sigs" --> S
-    S -- "whitelist(targets, deadline, sigs)" --> WL
-    S -- "unwhitelist(targets, deadline, sigs)" --> WL
+    O -- "whitelist(targets)<br/>unwhitelist(targets)" --> WL
+    V -- "quorum of sigs" --> R
+    R -- "whitelistBySig(targets, deadline, sigs)<br/>unwhitelistBySig(targets, deadline, sigs)" --> WL
     C -- "pauseFor / unpause" --> WL
     WL -- "isWhitelisted(a)<br/>(WhitelistStatus enum)" --> D
 ```
 
-`whitelist` is owner-gated in Phase 1 but open to any submitter in Phase 2;
-`unwhitelist` is never owner-gated, so a valid quorum can revoke an
-attestation regardless of phase (fail-safe: attestations must always be
-revocable).
+The owner-direct path is reserved for the trusted multisig and is
+permanently unreachable after `renounceOwnership()` (Phase 2 is sig-only).
+The sig path is open to any submitter regardless of phase — the validator
+quorum is the access control, not the caller. Whitelisting is gated by
+`whenNotPaused` on **both** paths; unwhitelisting is **never** gated by
+pause on either path (fail-safe: attestations must always be revocable).
 
 ### Key invariants
 
@@ -85,18 +95,22 @@ run points straight at the clause that broke.
   to a non-zero value.
 - **C2.** `isPaused()` is a pure function of `pausedUntil` and
   `block.timestamp` — no cached pause state anywhere.
-- **C3.** While paused, `whitelist` and `unwhitelist` revert with
-  `ContractPaused`. The Phase-1 owner admin paths (`addValidator`,
-  `removeValidator`, `setQuorum`, `setComplianceOfficer`) are also
-  gated by `whenNotPaused`. The recovery surface that *does* stay
-  reachable during pause is: compliance `pauseFor` / `unpause`, the
-  validator-self lever `setValidatorNonceFloor`, the post-renounce
+- **C3.** While paused, every **whitelisting** path
+  (`whitelist`, `whitelistBySig`) reverts with `ContractPaused`. The
+  Phase-1 owner admin paths (`addValidator`, `removeValidator`,
+  `setQuorum`, `setComplianceOfficer`) are also gated by
+  `whenNotPaused`. The recovery surface that *does* stay reachable
+  during pause is: compliance `pauseFor` / `unpause`, **both
+  unwhitelist paths** (`unwhitelist`, `unwhitelistBySig` — revoking
+  attestations is a fail-safe and must not be blocked by the breaker),
+  the validator-self lever `setValidatorNonceFloor`, the post-renounce
   `*BySig` admin twins, and the owner-only `revokeAllRoles` recovery
   hook (intentionally pause-callable as the only owner-side path
   available when the rogue actor is the compliance officer who
   triggered the pause). The breaker buys the quorum time to rotate
   via the `*BySig` paths or wait the pause out and use Phase-1
-  rotations; it does not freeze rotation itself.
+  rotations; it does not freeze rotation, and it does not freeze
+  revocation.
 
 **D. `isWhitelisted` semantics**
 
@@ -135,13 +149,19 @@ state to end users.
 The contract is designed to start under an owner and later transition to
 pure quorum-governed operation:
 
-| Phase | `owner()` | Admin path | `whitelist` submitter |
+| Phase | `owner()` | Admin path | Whitelist write paths |
 |---|---|---|---|
-| Owned (bootstrap) | EOA / multisig | `addValidator`, `removeValidator`, `setQuorum`, `setComplianceOfficer`, `revokeAllRoles` — `onlyOwner` | only the owner |
-| Renounced (steady state) | `address(0)` | `*BySig` twins of each admin action — gated by a quorum of validator sigs + `_requireRenounced` | anyone holding valid sigs |
+| Owned (bootstrap) | EOA / multisig | `addValidator`, `removeValidator`, `setQuorum`, `setComplianceOfficer`, `revokeAllRoles` — `onlyOwner` | `whitelist(address[])` / `unwhitelist(address[])` (owner-direct) **and** `whitelistBySig` / `unwhitelistBySig` (any submitter, quorum sigs) |
+| Renounced (steady state) | `address(0)` | `*BySig` twins of each admin action — gated by a quorum of validator sigs + `_requireRenounced` | `whitelistBySig` / `unwhitelistBySig` only — owner-direct paths revert via `onlyOwner` |
 
-Calling `renounceOwnership()` is irreversible; after that point, every admin
-mutation must be authorized by a validator quorum and anyone can submit.
+Calling `renounceOwnership()` is irreversible; after that point, every
+admin mutation and every whitelist mutation must be authorized by a
+validator quorum, and anyone can submit.
+
+The owner-direct and sig-based whitelist paths converge on the same
+underlying `isWhitelisted[a]` bit and emit the same
+`Whitelisted` / `Unwhitelisted` events. Off-chain consumers therefore do
+not need to disambiguate the source of a state change.
 
 `revokeAllRoles(a)` is an owner-only incident-response tool: it strips the
 validator role and the compliance flag from `a` in a single transaction,

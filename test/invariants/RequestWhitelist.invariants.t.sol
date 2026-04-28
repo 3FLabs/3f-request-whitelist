@@ -30,10 +30,10 @@ contract RequestWhitelistInvariants is Test {
     // Restrict the fuzzer to the handler's h_* selectors. Without this
     // the fuzzer will also try calling view methods, constructor-like
     // setters, and the private getters — harmless for state but wasteful.
-    bytes4[] memory selectors = new bytes4[](12);
+    bytes4[] memory selectors = new bytes4[](14);
     selectors[0] = RequestWhitelistHandler.h_warp.selector;
-    selectors[1] = RequestWhitelistHandler.h_whitelist.selector;
-    selectors[2] = RequestWhitelistHandler.h_unwhitelist.selector;
+    selectors[1] = RequestWhitelistHandler.h_whitelistBySig.selector;
+    selectors[2] = RequestWhitelistHandler.h_unwhitelistBySig.selector;
     selectors[3] = RequestWhitelistHandler.h_setValidatorNonceFloor.selector;
     selectors[4] = RequestWhitelistHandler.h_pauseFor.selector;
     selectors[5] = RequestWhitelistHandler.h_unpause.selector;
@@ -43,6 +43,8 @@ contract RequestWhitelistInvariants is Test {
     selectors[9] = RequestWhitelistHandler.h_setCompliance.selector;
     selectors[10] = RequestWhitelistHandler.h_renounceOwnership.selector;
     selectors[11] = RequestWhitelistHandler.h_revokeAllRoles.selector;
+    selectors[12] = RequestWhitelistHandler.h_whitelistDirect.selector;
+    selectors[13] = RequestWhitelistHandler.h_unwhitelistDirect.selector;
     targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     targetContract(address(handler));
   }
@@ -193,8 +195,8 @@ contract RequestWhitelistInvariants is Test {
   // ═══════════════════════════════════════════════════════════════════════════
 
   function testHandlerExercisesQuorum() public {
-    handler.h_whitelist(0x01, 0xff, uint32(1 hours));
-    handler.h_whitelist(0x02, 0xff, uint32(1 hours));
+    handler.h_whitelistBySig(0x01, 0xff, uint32(1 hours));
+    handler.h_whitelistBySig(0x02, 0xff, uint32(1 hours));
     // After two successful whitelists with two signers each, at least one
     // validator should have a consumed-nonces list populated. If not, the
     // sig-building path is broken and every other invariant is vacuous.
