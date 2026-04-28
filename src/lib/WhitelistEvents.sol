@@ -36,11 +36,13 @@ library WhitelistEvents {
   /// @param  enabled The new flag value.
   event ComplianceOfficerSet(address indexed officer, bool enabled);
 
-  /// @notice Emitted whenever a validator bumps their own nonce via
-  ///         `setValidatorNonce`, invalidating their outstanding sigs.
-  /// @param  validator The validator whose nonce changed.
-  /// @param  newNonce  The new on-chain nonce value.
-  event ValidatorNonceSet(address indexed validator, uint256 newNonce);
+  /// @notice Emitted whenever a validator bumps their own nonce floor
+  ///         via `setValidatorNonceFloor`, or whenever
+  ///         `_removeValidator` saturates the floor to
+  ///         `type(uint256).max` on removal.
+  /// @param  validator The validator whose floor changed.
+  /// @param  newFloor  The new on-chain nonce floor value.
+  event ValidatorNonceSet(address indexed validator, uint256 newFloor);
 
   /// @notice Emitted whenever `pausedUntil` moves forward (either a new
   ///         pause or an extension of an existing one).

@@ -17,10 +17,10 @@ library WhitelistErrors {
   ///         while the owner is still set.
   error NotOwnerWhileOwned();
 
-  /// @notice Reverts when a validator calls `setValidatorNonce` with a
-  ///         non-strictly-increasing value. The nonce floor can only
-  ///         move forward — shrinking it would re-expose previously
-  ///         invalidated signatures.
+  /// @notice Reverts when a validator calls `setValidatorNonceFloor`
+  ///         with a non-strictly-increasing value. The nonce floor can
+  ///         only move forward — shrinking it would re-expose
+  ///         previously invalidated signatures.
   error NewNonceNotIncreasing();
 
   /// @notice Reverts when `pauseFor` would not strictly extend the
@@ -41,7 +41,10 @@ library WhitelistErrors {
   error OwnerIsZero();
 
   /// @notice Reverts when the quorum would leave the contract unusable —
-  ///         either 0 or greater than the current validator count.
+  ///         either 0 or greater than or equal to the current validator
+  ///         count. The strict `quorum < validators.length` invariant
+  ///         is enforced both on `_setQuorum` and on `_removeValidator`
+  ///         (which rejects a removal that would leave `length <= quorum`).
   error QuorumOutOfRange();
 
   /// @notice Reverts when adding a validator would exceed `MAX_VALIDATORS`.

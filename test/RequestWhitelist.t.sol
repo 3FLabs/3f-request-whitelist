@@ -286,7 +286,7 @@ contract RequestWhitelistTest is Test {
     // Raise v1's floor to 10; any sig they produced at a lower nonce
     // must be rejected `NonceBelowFloor`.
     vm.prank(v1.addr);
-    wl.setValidatorNonce(10);
+    wl.setValidatorNonceFloor(10);
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
@@ -352,7 +352,7 @@ contract RequestWhitelistTest is Test {
     sigs[1] = _signWhitelist(v1, targets, deadline);
 
     vm.prank(v1.addr);
-    wl.setValidatorNonce(42);
+    wl.setValidatorNonceFloor(42);
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.NonceBelowFloor.selector);
@@ -361,17 +361,17 @@ contract RequestWhitelistTest is Test {
 
   function testSetValidatorNonceRejectsNonIncreasing() public {
     vm.prank(v0.addr);
-    wl.setValidatorNonce(5);
+    wl.setValidatorNonceFloor(5);
     vm.prank(v0.addr);
     vm.expectRevert(WhitelistErrors.NewNonceNotIncreasing.selector);
-    wl.setValidatorNonce(5);
+    wl.setValidatorNonceFloor(5);
   }
 
   function testSetValidatorNonceOnlyValidator() public {
     address stranger = makeAddr("stranger");
     vm.prank(stranger);
     vm.expectRevert(QuorumSigLib.NotValidator.selector);
-    wl.setValidatorNonce(1);
+    wl.setValidatorNonceFloor(1);
   }
 
   /// @dev The nonce floor is a monotonically-raised lever; the bitmap
@@ -381,17 +381,17 @@ contract RequestWhitelistTest is Test {
   ///      floor to `type(uint256).max` to permanently burn their sig
   ///      space — equivalent to the operator saying "retire this key
   ///      entirely". Re-admission of the same address is blocked
-  ///      because `setValidatorNonce` is strict-increase.
+  ///      because `setValidatorNonceFloor` is strict-increase.
   function testSetValidatorNonceAllowsMax() public {
     vm.prank(v0.addr);
-    wl.setValidatorNonce(type(uint256).max);
+    wl.setValidatorNonceFloor(type(uint256).max);
     assertEq(wl.validatorNonceFloor(v0.addr), type(uint256).max);
 
-    // Further setValidatorNonce calls are locked out — nothing is
+    // Further setValidatorNonceFloor calls are locked out — nothing is
     // strictly greater than max.
     vm.prank(v0.addr);
     vm.expectRevert(WhitelistErrors.NewNonceNotIncreasing.selector);
-    wl.setValidatorNonce(type(uint256).max);
+    wl.setValidatorNonceFloor(type(uint256).max);
   }
 
   // ---------- L-5: isWhitelisted enum surface -------------------------------
@@ -617,12 +617,12 @@ contract RequestWhitelistTest is Test {
   ///      saturates their floor to `type(uint256).max` so any
   ///      pre-signed sig at any reasonable nonce becomes
   ///      `NonceBelowFloor` thereafter. Combined with
-  ///      `setValidatorNonce`'s strict-increase rule, re-admitting the
+  ///      `setValidatorNonceFloor`'s strict-increase rule, re-admitting the
   ///      same address yields a permanently unusable key — operators
   ///      wanting to rotate must use a new address.
   function testRemoveValidatorBurnsNonceFloor() public {
     vm.prank(v2.addr);
-    wl.setValidatorNonce(7);
+    wl.setValidatorNonceFloor(7);
 
     // Pad the set so removing v2 doesn't violate the strict
     // `quorum < length` invariant.
@@ -859,14 +859,14 @@ contract RequestWhitelistTest is Test {
     wl.setComplianceOfficer(makeAddr("co2"), true);
   }
 
-  /// @dev H-1 fix: `setValidatorNonce` must remain callable while paused,
+  /// @dev H-1 fix: `setValidatorNonceFloor` must remain callable while paused,
   ///      because the most credible reason to pause is suspected key
   ///      compromise — exactly the scenario that needs mass-invalidation.
   function testSetValidatorNonceWorksWhilePaused() public {
     vm.prank(compliance);
     wl.pauseFor(1 days);
     vm.prank(v0.addr);
-    wl.setValidatorNonce(42);
+    wl.setValidatorNonceFloor(42);
     assertEq(wl.validatorNonceFloor(v0.addr), 42);
   }
 
@@ -998,7 +998,7 @@ contract RequestWhitelistTest is Test {
 
   /// @dev Picks the next nonce for validator `v`: max of the on-chain
   ///      floor and the suite's local cursor, then advances the cursor.
-  ///      Tests that raise the floor via `setValidatorNonce` automatically
+  ///      Tests that raise the floor via `setValidatorNonceFloor` automatically
   ///      get sigs at or above the new floor on the next helper call.
   function _pickNonce(address v) internal returns (uint256) {
     uint256 floor = wl.validatorNonceFloor(v);

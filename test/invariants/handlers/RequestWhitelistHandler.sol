@@ -190,7 +190,7 @@ contract RequestWhitelistHandler is Test {
     _postUpdate();
   }
 
-  function h_setValidatorNonce(uint8 vIdx, uint32 bump) external {
+  function h_setValidatorNonceFloor(uint8 vIdx, uint32 bump) external {
     address v = _pool[vIdx % POOL_SIZE].addr;
     uint256 cur = wl.validatorNonceFloor(v);
     if (cur == type(uint256).max) {
@@ -203,7 +203,7 @@ contract RequestWhitelistHandler is Test {
     if (newFloor < cur) newFloor = type(uint256).max; // overflow guard
 
     vm.prank(v);
-    try wl.setValidatorNonce(newFloor) {
+    try wl.setValidatorNonceFloor(newFloor) {
       _tag("setFloor", true);
     } catch {
       _tag("setFloor", false);

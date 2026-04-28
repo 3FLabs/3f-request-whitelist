@@ -30,11 +30,11 @@ contract RequestWhitelistInvariants is Test {
     // Restrict the fuzzer to the handler's h_* selectors. Without this
     // the fuzzer will also try calling view methods, constructor-like
     // setters, and the private getters — harmless for state but wasteful.
-    bytes4[] memory selectors = new bytes4[](11);
+    bytes4[] memory selectors = new bytes4[](12);
     selectors[0] = RequestWhitelistHandler.h_warp.selector;
     selectors[1] = RequestWhitelistHandler.h_whitelist.selector;
     selectors[2] = RequestWhitelistHandler.h_unwhitelist.selector;
-    selectors[3] = RequestWhitelistHandler.h_setValidatorNonce.selector;
+    selectors[3] = RequestWhitelistHandler.h_setValidatorNonceFloor.selector;
     selectors[4] = RequestWhitelistHandler.h_pauseFor.selector;
     selectors[5] = RequestWhitelistHandler.h_unpause.selector;
     selectors[6] = RequestWhitelistHandler.h_addValidator.selector;
@@ -42,6 +42,7 @@ contract RequestWhitelistInvariants is Test {
     selectors[8] = RequestWhitelistHandler.h_setQuorum.selector;
     selectors[9] = RequestWhitelistHandler.h_setCompliance.selector;
     selectors[10] = RequestWhitelistHandler.h_renounceOwnership.selector;
+    selectors[11] = RequestWhitelistHandler.h_revokeAllRoles.selector;
     targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     targetContract(address(handler));
   }
@@ -96,7 +97,7 @@ contract RequestWhitelistInvariants is Test {
 
   /// @dev B1. `validatorNonceFloor[v]` is monotonically non-decreasing
   ///      across every state transition. The floor has only three
-  ///      writers — `setValidatorNonce` (strict-increase), `_removeValidator`
+  ///      writers — `setValidatorNonceFloor` (strict-increase), `_removeValidator`
   ///      (saturate to max), and `revokeAllRoles` (same as removal) —
   ///      none of which lower it.
   function invariant_B1_nonceFloorMonotonic() external view {
