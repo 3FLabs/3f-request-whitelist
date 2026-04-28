@@ -16,7 +16,7 @@ import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 ///             to 256 entries; consumers must enforce the cap via
 ///             `MAX_VALIDATORS` whenever they grow the set.
 ///           - A *per-validator, persistent* bitmap (stored in
-///             `RequestWhitelist`'s `Layout.validatorNonceBitmap`) marks
+///             `RequestWhitelist`'s `StorageLayout.validatorNonceBitmap`) marks
 ///             which nonces each validator has already consumed. Each
 ///             word holds 256 bits; nonce `n` maps to bit `n % 256` of
 ///             word `n / 256`. Because any previously-consumed nonce
@@ -46,13 +46,17 @@ library QuorumSigLib {
   /// @param  nonce     Validator-chosen nonce. The contract accepts any
   ///                   nonce at or above the validator's current
   ///                   `nonceFloor` that has not yet been consumed, in
-  ///                   any submission order. The bit for this nonce is
-  ///                   set on successful use so the same sig can never
-  ///                   be replayed. Validators are free to allocate
+  ///                   any submission order — with one exception:
+  ///                   `nonce == type(uint256).max` is reserved as the
+  ///                   "retired-validator" sentinel and is always
+  ///                   rejected `NonceBelowFloor`, regardless of the
+  ///                   floor value. The bit for this nonce is set on
+  ///                   successful use so the same sig can never be
+  ///                   replayed. Validators are free to allocate
   ///                   sequentially (simplest), use random / time-based
   ///                   nonces (fine too), or skip ranges — only the
-  ///                   "not-below-floor, not-already-consumed" invariant
-  ///                   is enforced.
+  ///                   "not-below-floor, not-already-consumed, not the
+  ///                   max-sentinel" invariant is enforced.
   /// @param  signature Raw 65-byte ECDSA payload or an opaque blob the
   ///                   ERC-1271 signer contract understands.
   struct Sig {
@@ -73,7 +77,9 @@ library QuorumSigLib {
   error NotValidator();
   /// @notice Reverts when a sig's nonce is strictly below the
   ///         validator's current `nonceFloor` (i.e. the mass-invalidate
-  ///         lever has been pulled past this point).
+  ///         lever has been pulled past this point), or when the nonce
+  ///         is the reserved `type(uint256).max` retired-validator
+  ///         sentinel.
   error NonceBelowFloor();
   /// @notice Reverts when a sig's nonce has already been consumed by a
   ///         prior successful verification.
@@ -109,12 +115,20 @@ library QuorumSigLib {
   ///           1. Validator is in the enumerable set (cheap).
   ///           2. Call-local dedup — same validator not already credited
   ///              in this call (memory-only).
-  ///           3. Nonce is at or above the validator's current floor.
+  ///           3. Nonce is at or above the validator's current floor
+  ///              and is not the `type(uint256).max` sentinel.
   ///           4. Nonce has not already been consumed.
   ///           5. ECDSA / ERC-1271 signature recovers to the digest.
   ///         The persistent bitmap bit is set only *after* the signature
   ///         verifies, so a revert on step 5 leaves the nonce
   ///         unconsumed and the sig can be re-submitted.
+  ///
+  ///         The max-nonce sentinel rejection in step 3 is what makes
+  ///         removed-validator floor saturation airtight: setting the
+  ///         floor to `type(uint256).max` would otherwise still leave
+  ///         exactly one usable nonce (`floor` itself, since the floor
+  ///         check is strict-less-than). With the sentinel rejected,
+  ///         removal truly retires the address.
   /// @param  validators        Storage pointer to the whitelist's
   ///                           validator set.
   /// @param  nonceFloors       Storage pointer to the per-validator
@@ -149,6 +163,11 @@ library QuorumSigLib {
     if (seen & bit != 0) revert DuplicateSignature();
 
     if (s.nonce < nonceFloors[s.validator]) revert NonceBelowFloor();
+    // `type(uint256).max` is reserved as the retired-validator sentinel.
+    // Without this branch, `_removeValidator`'s floor saturation would
+    // still leave one usable nonce (the floor itself, since the floor
+    // check is strict-less-than) — the sentinel closes that gap.
+    if (s.nonce == type(uint256).max) revert NonceBelowFloor();
 
     // `n >> 8` is `n / 256`; `1 << (n & 0xff)` is the bit for `n % 256`.
     uint256 word = s.nonce >> 8;

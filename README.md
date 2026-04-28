@@ -18,7 +18,7 @@ flowchart LR
     V["off-chain validators<br/>sign EIP-712 WhitelistRequest"]
     S(["Owner (phase 1)<br/>/ anyone (phase 2)"])
     C(["Compliance officer"])
-    WL["RequestWhitelist<br/>_isWhitelisted[a]<br/>pausedUntil"]
+    WL["RequestWhitelist<br/>isWhitelisted[a]<br/>pausedUntil"]
     D(["downstream protocols<br/>/ dApps"])
 
     V -- "quorum of sigs" --> S
@@ -42,9 +42,15 @@ run points straight at the clause that broke.
 **A. Validator set & quorum structure**
 
 - **A1.** `1 <= quorum < validators.length <= MAX_VALIDATORS` (256). The
-  strict inequality between `quorum` and `validators.length` guarantees
-  that no quorum-sized coalition can brick or fully capture the registry
-  by shrinking the set down to its own membership.
+  strict inequality between `quorum` and `validators.length` is a
+  one-step anti-capture rail: a quorum-sized coalition cannot in a
+  single transaction remove every dissenting validator, because each
+  removal still has to leave `length > quorum`. Iterative capture is
+  *not* prevented — a coalition that controls quorum can lower
+  `quorum` first and then remove non-coalition members one by one;
+  the contract-level rule only buys time and emits on-chain
+  observability (`ValidatorRemoved`, `QuorumSet`). Defense against
+  coordinated capture is governance-level.
 - **A2.** The validator set never contains duplicates and never contains
   `address(0)`. `_addValidator` rejects both; the set itself is a
   solady `EnumerableSetLib.AddressSet` so duplicates are structurally
@@ -56,14 +62,15 @@ run points straight at the clause that broke.
 **B. Nonce discipline**
 
 - **B1.** `validatorNonceFloor[v]` is monotonically non-decreasing.
-  `setValidatorNonce` is strict-increase; `_removeValidator` and
+  `setValidatorNonceFloor` is strict-increase; `_removeValidator` and
   `revokeAllRoles` saturate to `type(uint256).max`; no other writer
   exists.
 - **B2.** Once a validator has ever been removed, their nonce floor is
   `type(uint256).max` forever — even if the same address is later
-  re-added. Combined with the bitmap's permanent-set property this
-  closes the re-add replay window: no signature the retired address
-  ever produced can pass `NonceBelowFloor` again.
+  re-added. Combined with the bitmap's permanent-set property and
+  `QuorumSigLib`'s explicit rejection of `nonce == type(uint256).max`,
+  this closes the re-add replay window: no signature the retired
+  address ever produced can pass.
 - **B3.** Each validator signature carries a signer-chosen nonce. The
   nonce is recorded in a per-validator bitmap on successful verify and
   permanently single-use — a bit set to `1` never returns to `0`. Sigs
@@ -79,10 +86,17 @@ run points straight at the clause that broke.
 - **C2.** `isPaused()` is a pure function of `pausedUntil` and
   `block.timestamp` — no cached pause state anywhere.
 - **C3.** While paused, `whitelist` and `unwhitelist` revert with
-  `ContractPaused`. Compliance `pauseFor` / `unpause` and every
-  rotation path (`setValidatorNonce`, all `*BySig` admin functions)
-  remain reachable — the circuit breaker exists to buy the quorum time
-  to rotate, not to freeze rotation itself.
+  `ContractPaused`. The Phase-1 owner admin paths (`addValidator`,
+  `removeValidator`, `setQuorum`, `setComplianceOfficer`) are also
+  gated by `whenNotPaused`. The recovery surface that *does* stay
+  reachable during pause is: compliance `pauseFor` / `unpause`, the
+  validator-self lever `setValidatorNonceFloor`, the post-renounce
+  `*BySig` admin twins, and the owner-only `revokeAllRoles` recovery
+  hook (intentionally pause-callable as the only owner-side path
+  available when the rogue actor is the compliance officer who
+  triggered the pause). The breaker buys the quorum time to rotate
+  via the `*BySig` paths or wait the pause out and use Phase-1
+  rotations; it does not freeze rotation itself.
 
 **D. `isWhitelisted` semantics**
 
@@ -90,8 +104,8 @@ run points straight at the clause that broke.
   `Whitelisted` or `NotWhitelisted` — the return is always one of the
   `Paused*` variants, regardless of the underlying attestation bit.
 - **D2.** While live (not paused), `isWhitelisted(a)` returns exactly
-  one of `Whitelisted` / `NotWhitelisted`, matching the `_isWhitelisted`
-  bit.
+  one of `Whitelisted` / `NotWhitelisted`, matching the `isWhitelisted`
+  storage bit.
 
 **E. Ownership irreversibility**
 
@@ -164,13 +178,16 @@ Two pieces of per-validator state guard replay:
   relayer race.
 - `validatorNonceFloor[v]` — a single scalar below which every sig is
   rejected `NonceBelowFloor`. This is the **mass-invalidate lever**.
-  The validator raises it themselves via `setValidatorNonce(newFloor)`
-  (one SSTORE, no per-sig bookkeeping). The floor is strict-increase:
-  it cannot be lowered once raised. Removal of a validator saturates
-  the floor to `type(uint256).max`, which permanently retires that
-  address from ever signing again — combined with the strict-increase
-  rule, a removed validator cannot be re-admitted at the same address
-  with a lower floor, so any pre-signed sig at any reasonable nonce is
+  The validator raises it themselves via
+  `setValidatorNonceFloor(newFloor)` (one SSTORE, no per-sig
+  bookkeeping). The floor is strict-increase: it cannot be lowered
+  once raised. Removal of a validator saturates the floor to
+  `type(uint256).max`, which permanently retires that address from
+  ever signing again — `QuorumSigLib` separately rejects
+  `nonce == type(uint256).max` as the retired-validator sentinel, so
+  the saturated floor leaves *no* usable nonce. Combined with the
+  strict-increase rule, a removed validator cannot be re-admitted at
+  the same address with a lower floor, so any pre-signed sig is
   unusable after removal (closes the re-add replay window).
 
 Validators are free to allocate nonces sequentially (simplest),
@@ -179,8 +196,8 @@ consumed" rule is enforced. The suggested default for operators is
 sequential from 0, since that minimises bitmap storage cost: only the
 words actually touched by consumed nonces are written to.
 
-`setValidatorNonce(newFloor)` remains reachable while the registry is
-paused. Pausing *is* the signal that something is wrong, so the
+`setValidatorNonceFloor(newFloor)` remains reachable while the registry
+is paused. Pausing *is* the signal that something is wrong, so the
 mass-invalidate lever must be usable under pause.
 
 #### Trust model for ERC-1271 signers
@@ -232,7 +249,7 @@ All mutable state lives in a single ERC-7201 namespaced struct at
 which cannot collide.
 
 **Storage upgrade rule (append-only)**: future versions must never
-reorder, resize, or remove fields in `Layout`. Slot 0's packing of
+reorder, resize, or remove fields in `StorageLayout`. Slot 0's packing of
 `uint16 quorum` + `uint48 pausedUntil` leaves 26 bytes for forward-
 compatible flags and must not be rearranged. Dynamic members (the
 validator set and the mappings) each anchor their own base slot, so
