@@ -12,20 +12,39 @@ import {WhitelistErrors} from "./lib/WhitelistErrors.sol";
 import {WhitelistEvents} from "./lib/WhitelistEvents.sol";
 
 /// @title  RequestWhitelist
-/// @notice On-chain attestation registry. A quorum of signing validators
-///         attests that an address is authored by this registry's operator;
-///         consumers call `isWhitelisted(address)` (see `IWhitelist`) as the
-///         single source of truth. A compliance role can freeze the
-///         registry for a bounded window; while frozen, `isWhitelisted`
-///         reports one of the `Paused*` variants — never `Whitelisted` —
-///         and every whitelisting call (`whitelist`, `unwhitelist`) reverts
-///         with `ContractPaused`. Owner-side admin paths (`addValidator`,
-///         `removeValidator`, `setQuorum`, `setComplianceOfficer`) are also
-///         gated by `whenNotPaused`; the validator-self lever
+/// @notice On-chain attestation registry. Two parallel write paths feed
+///         the underlying `isWhitelisted[a]` bit: the trusted owner can
+///         flip it directly (`whitelist` / `unwhitelist`), and a quorum
+///         of validators can flip it via signed batches
+///         (`whitelistBySig` / `unwhitelistBySig`). Validators are the
+///         distributed automation lane; the owner is the trusted-multisig
+///         escape hatch. Both paths converge on the same storage bit and
+///         the same events. Consumers call `isWhitelisted(address)` (see
+///         `IWhitelist`) as the single source of truth.
+///
+///         A compliance role can freeze the registry for a bounded
+///         window. While frozen, `isWhitelisted` reports one of the
+///         `Paused*` variants — never `Whitelisted` — and every
+///         **whitelisting** call (`whitelist`, `whitelistBySig`) reverts
+///         with `ContractPaused`. **Unwhitelisting** (`unwhitelist`,
+///         `unwhitelistBySig`) deliberately remains callable while
+///         paused: revoking attestations is a fail-safe that must not be
+///         blocked by the circuit breaker.
+///
+///         Owner-side admin paths (`addValidator`, `removeValidator`,
+///         `setQuorum`, `setComplianceOfficer`) are gated by
+///         `whenNotPaused`; the validator-self lever
 ///         (`setValidatorNonceFloor`), the post-renounce `*BySig` admin
 ///         twins, and the owner-only `revokeAllRoles` recovery hook
 ///         remain reachable during pause so the circuit breaker cannot
 ///         lock out the recovery it was built to enable.
+///
+///         Phase model: while `owner() != address(0)` (Phase 1) both
+///         the owner-direct and the sig paths are open. After
+///         `renounceOwnership()` (Phase 2) the owner-direct paths are
+///         permanently unreachable (the `onlyOwner` modifier reverts
+///         once the slot is zero); only the sig path remains, governed
+///         by the validator quorum.
 ///
 ///         The contract is factory- and proxy-agnostic: deploy the
 ///         implementation once, put it behind any ERC-1967 proxy, and call
@@ -130,16 +149,6 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
   ///      officer at the time of the call.
   modifier onlyCompliance() {
     if (!_getStorage().isComplianceOfficer[msg.sender]) revert WhitelistErrors.NotCompliance();
-    _;
-  }
-
-  /// @dev While the owner slot is non-zero, only the owner may proceed.
-  ///      Once `renounceOwnership()` has set it to `address(0)` the gate
-  ///      lifts and any caller may submit (the signature quorum is still
-  ///      enforced downstream).
-  modifier ownerGatedWhenOwned() {
-    address o = owner();
-    if (o != address(0) && msg.sender != o) revert WhitelistErrors.NotOwnerWhileOwned();
     _;
   }
 
@@ -284,17 +293,68 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
   // State-changing external functions
   // ───────────────────────────────────────────────────────────────────────────
 
-  /// @notice Flips `targets` to the whitelisted state.
-  /// @dev    Validator quorum signatures are always required; while an
-  ///         owner is set, only the owner may submit the call.
-  /// @param  targets  Addresses to whitelist. Can include already-whitelisted
-  ///                  entries; those are silently skipped.
+  /// @notice Flips `targets` to the whitelisted state. Owner-only
+  ///         direct path — no validator signatures required. Sig-based
+  ///         submitters use `whitelistBySig` instead.
+  /// @dev    `whenNotPaused`: while paused, `isWhitelisted` is masked to
+  ///         the `Paused*` variants anyway, so flipping bits during
+  ///         pause would be invisible to integrators and arguably
+  ///         misleading. Mirrors the `whenNotPaused` gate on
+  ///         `whitelistBySig`.
+  ///
+  ///         Available only in Phase 1 — once `owner()` is renounced,
+  ///         `onlyOwner` reverts and this entry point is permanently
+  ///         unreachable; quorum-signed `whitelistBySig` remains.
+  /// @param  targets Addresses to whitelist. Already-whitelisted entries
+  ///                 are silently skipped (so the call stays idempotent
+  ///                 and emits one event per actual flip).
+  function whitelist(address[] calldata targets) external onlyOwner whenNotPaused {
+    StorageLayout storage $ = _getStorage();
+    for (uint256 i; i < targets.length; ++i) {
+      if (!$.isWhitelisted[targets[i]]) {
+        $.isWhitelisted[targets[i]] = true;
+        emit WhitelistEvents.Whitelisted(targets[i]);
+      }
+    }
+  }
+
+  /// @notice Flips `targets` to the non-whitelisted state. Owner-only
+  ///         direct path — no validator signatures required. Sig-based
+  ///         submitters use `unwhitelistBySig` instead.
+  /// @dev    Intentionally **not** `whenNotPaused`: revoking
+  ///         attestations is a fail-safe that must work even while the
+  ///         circuit breaker is active. Mirrors the absence of
+  ///         `whenNotPaused` on `unwhitelistBySig`. Available only in
+  ///         Phase 1 — once `owner()` is renounced, `onlyOwner` reverts
+  ///         and this entry point is permanently unreachable.
+  /// @param  targets Addresses to remove from the whitelist. Addresses
+  ///                 that weren't whitelisted are silently skipped.
+  function unwhitelist(address[] calldata targets) external onlyOwner {
+    StorageLayout storage $ = _getStorage();
+    for (uint256 i; i < targets.length; ++i) {
+      if ($.isWhitelisted[targets[i]]) {
+        $.isWhitelisted[targets[i]] = false;
+        emit WhitelistEvents.Unwhitelisted(targets[i]);
+      }
+    }
+  }
+
+  /// @notice Flips `targets` to the whitelisted state via a quorum of
+  ///         validator signatures. Open to any submitter — the
+  ///         signatures are the access control, not the caller. The
+  ///         owner-direct twin is `whitelist(address[])`.
+  /// @dev    `whenNotPaused`: same rationale as the owner-direct
+  ///         twin — flipping bits during pause is invisible to
+  ///         integrators (`isWhitelisted` reads as `Paused*`) so the
+  ///         contract refuses to accept signatures it could not
+  ///         meaningfully act on.
+  /// @param  targets  Addresses to whitelist. Already-whitelisted entries
+  ///                  are silently skipped.
   /// @param  deadline Unix timestamp beyond which the sigs stop being valid.
   /// @param  sigs     Validator sigs covering the batch. `sigs.length >= quorum`.
-  function whitelist(address[] calldata targets, uint256 deadline, QuorumSigLib.Sig[] calldata sigs)
+  function whitelistBySig(address[] calldata targets, uint256 deadline, QuorumSigLib.Sig[] calldata sigs)
     external
     whenNotPaused
-    ownerGatedWhenOwned
   {
     _verifyBatchQuorum(_WHITELIST_TYPEHASH, targets, deadline, sigs);
     StorageLayout storage $ = _getStorage();
@@ -306,17 +366,18 @@ contract RequestWhitelist is IWhitelist, Initializable, Ownable, EIP712 {
     }
   }
 
-  /// @notice Flips `targets` to the non-whitelisted state.
-  /// @dev    Validator quorum signatures are required; never owner-gated,
-  ///         so any caller with valid sigs may submit. Addresses that
-  ///         weren't whitelisted are silently skipped.
-  /// @param  targets  Addresses to remove from the whitelist.
+  /// @notice Flips `targets` to the non-whitelisted state via a quorum
+  ///         of validator signatures. Open to any submitter. The
+  ///         owner-direct twin is `unwhitelist(address[])`.
+  /// @dev    Intentionally **not** `whenNotPaused`: revoking
+  ///         attestations is a fail-safe and must remain reachable
+  ///         while the circuit breaker is active. Mirrors the absence
+  ///         of `whenNotPaused` on `unwhitelist(address[])`.
+  /// @param  targets  Addresses to remove from the whitelist. Addresses
+  ///                  that weren't whitelisted are silently skipped.
   /// @param  deadline Unix timestamp beyond which the sigs stop being valid.
   /// @param  sigs     Validator sigs covering the batch. `sigs.length >= quorum`.
-  function unwhitelist(address[] calldata targets, uint256 deadline, QuorumSigLib.Sig[] calldata sigs)
-    external
-    whenNotPaused
-  {
+  function unwhitelistBySig(address[] calldata targets, uint256 deadline, QuorumSigLib.Sig[] calldata sigs) external {
     _verifyBatchQuorum(_UNWHITELIST_TYPEHASH, targets, deadline, sigs);
     StorageLayout storage $ = _getStorage();
     for (uint256 i; i < targets.length; ++i) {

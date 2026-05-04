@@ -13,10 +13,6 @@ library WhitelistErrors {
   /// @notice Reverts when the caller is not a compliance officer.
   error NotCompliance();
 
-  /// @notice Reverts when a non-owner caller tries to submit `whitelist`
-  ///         while the owner is still set.
-  error NotOwnerWhileOwned();
-
   /// @notice Reverts when a validator calls `setValidatorNonceFloor`
   ///         with a non-strictly-increasing value. The nonce floor can
   ///         only move forward — shrinking it would re-expose

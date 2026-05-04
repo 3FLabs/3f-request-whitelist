@@ -158,7 +158,7 @@ contract RequestWhitelistTest is Test {
     sigs[1] = _signWhitelist(v1, targets, deadline);
 
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
 
     assertTrue(_listed(t0));
     assertTrue(_listed(t1));
@@ -187,13 +187,18 @@ contract RequestWhitelistTest is Test {
     sigs[1] = QuorumSigLib.Sig({validator: address(contractSigner), nonce: 0, signature: abi.encodePacked(r, s, vv)});
 
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
     assertTrue(_listed(t0));
   }
 
   // ---------- whitelist rejections ------------------------------------------
 
-  function testWhitelistRevertsWhenOwnerAndSubmitterMismatches() public {
+  /// @dev `whitelistBySig` is intentionally **not** owner-gated, even
+  ///      while the owner slot is set. The validator quorum is the
+  ///      access control, not the caller — any submitter holding valid
+  ///      sigs may relay. This test pins that policy by submitting from
+  ///      a stranger while owner is still configured.
+  function testWhitelistBySigOpenToAnyCallerWhileOwned() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
     uint256 deadline = block.timestamp + 1 hours;
@@ -202,8 +207,11 @@ contract RequestWhitelistTest is Test {
     sigs[0] = _signWhitelist(v0, targets, deadline);
     sigs[1] = _signWhitelist(v1, targets, deadline);
 
-    vm.expectRevert(WhitelistErrors.NotOwnerWhileOwned.selector);
-    wl.whitelist(targets, deadline, sigs);
+    address stranger = makeAddr("stranger");
+    vm.prank(stranger);
+    wl.whitelistBySig(targets, deadline, sigs);
+    assertTrue(_listed(t0));
+    assertTrue(wl.owner() != address(0), "owner still set: Phase 1");
   }
 
   function testWhitelistRevertsExpired() public {
@@ -218,7 +226,7 @@ contract RequestWhitelistTest is Test {
     vm.warp(deadline + 1);
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.SignatureExpired.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   function testWhitelistRevertsUnderQuorum() public {
@@ -231,7 +239,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.QuorumNotMet.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   function testWhitelistRevertsDuplicateSigner() public {
@@ -245,7 +253,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.DuplicateSignature.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   function testWhitelistRevertsNonValidator() public {
@@ -260,7 +268,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.NotValidator.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   function testWhitelistRevertsBadSignature() public {
@@ -279,7 +287,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.SignatureInvalid.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   function testWhitelistRevertsNonceBelowFloor() public {
@@ -298,7 +306,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.NonceBelowFloor.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   function testWhitelistRevertsNonceConsumed() public {
@@ -314,14 +322,14 @@ contract RequestWhitelistTest is Test {
     first[0] = v0Sig0;
     first[1] = v1Sig0;
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, first);
+    wl.whitelistBySig(targets, deadline, first);
 
     QuorumSigLib.Sig[] memory replay = new QuorumSigLib.Sig[](2);
     replay[0] = v0Sig0;
     replay[1] = v1Sig0;
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.NonceConsumed.selector);
-    wl.whitelist(targets, deadline, replay);
+    wl.whitelistBySig(targets, deadline, replay);
   }
 
   function testWhitelistRevertsWhenPaused() public {
@@ -337,7 +345,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     vm.expectRevert(WhitelistErrors.ContractPaused.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   // ---------- validator nonce -----------------------------------------------
@@ -356,7 +364,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.NonceBelowFloor.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   function testSetValidatorNonceRejectsNonIncreasing() public {
@@ -486,12 +494,16 @@ contract RequestWhitelistTest is Test {
 
     address stranger = makeAddr("stranger");
     vm.prank(stranger);
-    wl.unwhitelist(targets, deadline, sigs);
+    wl.unwhitelistBySig(targets, deadline, sigs);
 
     assertFalse(_listed(t0));
   }
 
-  function testUnwhitelistRevertsWhenPaused() public {
+  /// @dev Revoking attestations is a fail-safe and must remain
+  ///      reachable while the circuit breaker is active. Both
+  ///      unwhitelist paths (owner-direct and sig) must work during
+  ///      pause; this test pins the sig path.
+  function testUnwhitelistBySigWorksWhilePaused() public {
     _whitelistAsOwner(t0);
     vm.prank(compliance);
     wl.pauseFor(1 days);
@@ -503,8 +515,124 @@ contract RequestWhitelistTest is Test {
     sigs[0] = _signUnwhitelist(v0, targets, deadline);
     sigs[1] = _signUnwhitelist(v1, targets, deadline);
 
+    wl.unwhitelistBySig(targets, deadline, sigs);
+    // While paused, `isWhitelisted` masks to the Paused* variants —
+    // assert the underlying bit was actually flipped by reading the
+    // post-pause state.
+    vm.warp(block.timestamp + 2 days);
+    assertFalse(wl.isPaused());
+    assertFalse(_listed(t0));
+  }
+
+  // ---------- owner-direct whitelist / unwhitelist --------------------------
+
+  function testWhitelistDirectByOwner() public {
+    address[] memory targets = new address[](2);
+    targets[0] = t0;
+    targets[1] = t1;
+    vm.prank(ownerAddr);
+    wl.whitelist(targets);
+    assertTrue(_listed(t0));
+    assertTrue(_listed(t1));
+  }
+
+  function testWhitelistDirectRejectsNonOwner() public {
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    address stranger = makeAddr("stranger");
+    vm.prank(stranger);
+    vm.expectRevert(Ownable.Unauthorized.selector);
+    wl.whitelist(targets);
+  }
+
+  function testWhitelistDirectRevertsWhenPaused() public {
+    vm.prank(compliance);
+    wl.pauseFor(1 days);
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    vm.prank(ownerAddr);
     vm.expectRevert(WhitelistErrors.ContractPaused.selector);
-    wl.unwhitelist(targets, deadline, sigs);
+    wl.whitelist(targets);
+  }
+
+  /// @dev Phase-2 invariant: once the owner is renounced, the
+  ///      owner-direct whitelist path is permanently unreachable. The
+  ///      previous owner address is no longer privileged.
+  function testWhitelistDirectRevertsAfterRenounce() public {
+    vm.prank(ownerAddr);
+    wl.renounceOwnership();
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    vm.prank(ownerAddr);
+    vm.expectRevert(Ownable.Unauthorized.selector);
+    wl.whitelist(targets);
+  }
+
+  function testWhitelistDirectIsIdempotent() public {
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    vm.prank(ownerAddr);
+    wl.whitelist(targets);
+    assertTrue(_listed(t0));
+    // Second call must be a silent no-op (no revert, no spurious event).
+    vm.prank(ownerAddr);
+    wl.whitelist(targets);
+    assertTrue(_listed(t0));
+  }
+
+  function testUnwhitelistDirectByOwner() public {
+    _whitelistAsOwner(t0);
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    vm.prank(ownerAddr);
+    wl.unwhitelist(targets);
+    assertFalse(_listed(t0));
+  }
+
+  function testUnwhitelistDirectRejectsNonOwner() public {
+    _whitelistAsOwner(t0);
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    address stranger = makeAddr("stranger");
+    vm.prank(stranger);
+    vm.expectRevert(Ownable.Unauthorized.selector);
+    wl.unwhitelist(targets);
+  }
+
+  /// @dev Mirrors `testUnwhitelistBySigWorksWhilePaused` for the
+  ///      owner-direct path: revoking attestations is a fail-safe and
+  ///      must not be blocked by the circuit breaker.
+  function testUnwhitelistDirectWorksWhilePaused() public {
+    _whitelistAsOwner(t0);
+    vm.prank(compliance);
+    wl.pauseFor(1 days);
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    vm.prank(ownerAddr);
+    wl.unwhitelist(targets);
+    vm.warp(block.timestamp + 2 days);
+    assertFalse(wl.isPaused());
+    assertFalse(_listed(t0));
+  }
+
+  function testUnwhitelistDirectRevertsAfterRenounce() public {
+    _whitelistAsOwner(t0);
+    vm.prank(ownerAddr);
+    wl.renounceOwnership();
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    vm.prank(ownerAddr);
+    vm.expectRevert(Ownable.Unauthorized.selector);
+    wl.unwhitelist(targets);
+  }
+
+  function testUnwhitelistDirectIsIdempotent() public {
+    address[] memory targets = new address[](1);
+    targets[0] = t0;
+    // Target was never whitelisted; the call must silently no-op.
+    vm.prank(ownerAddr);
+    wl.unwhitelist(targets);
+    assertFalse(_listed(t0));
   }
 
   // ---------- pause semantics -----------------------------------------------
@@ -597,7 +725,7 @@ contract RequestWhitelistTest is Test {
 
     address stranger = makeAddr("stranger");
     vm.prank(stranger);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
     assertTrue(_listed(t0));
   }
 
@@ -660,7 +788,7 @@ contract RequestWhitelistTest is Test {
     sigs[0] = _signUnwhitelist(v0, targets, deadline);
     sigs[1] = leaked;
     vm.expectRevert(QuorumSigLib.NonceBelowFloor.selector);
-    wl.unwhitelist(targets, deadline, sigs);
+    wl.unwhitelistBySig(targets, deadline, sigs);
   }
 
   function testAddValidatorDuplicateReverts() public {
@@ -690,14 +818,14 @@ contract RequestWhitelistTest is Test {
     sigs[1] = _signWhitelistWithNonce(v1, targets, deadline, 0);
 
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
 
     assertTrue(wl.isNonceConsumed(v0.addr, 0), "v0 nonce consumed");
     assertTrue(wl.isNonceConsumed(v1.addr, 0), "v1 nonce consumed");
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.NonceConsumed.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   function testUnwhitelistSigCannotBeReplayedToUndoRewhitelist() public {
@@ -713,19 +841,19 @@ contract RequestWhitelistTest is Test {
 
     address stranger = makeAddr("stranger");
     vm.prank(stranger);
-    wl.unwhitelist(targets, deadline, unsigs);
+    wl.unwhitelistBySig(targets, deadline, unsigs);
     assertFalse(_listed(t0));
 
     QuorumSigLib.Sig[] memory reWhitelist = new QuorumSigLib.Sig[](2);
     reWhitelist[0] = _signWhitelist(v0, targets, deadline);
     reWhitelist[1] = _signWhitelist(v1, targets, deadline);
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, reWhitelist);
+    wl.whitelistBySig(targets, deadline, reWhitelist);
     assertTrue(_listed(t0));
 
     vm.prank(stranger);
     vm.expectRevert(QuorumSigLib.NonceConsumed.selector);
-    wl.unwhitelist(targets, deadline, unsigs);
+    wl.unwhitelistBySig(targets, deadline, unsigs);
 
     assertTrue(_listed(t0));
   }
@@ -753,19 +881,19 @@ contract RequestWhitelistTest is Test {
 
     // Submit 5 first — passes.
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, batchAt5);
+    wl.whitelistBySig(targets, deadline, batchAt5);
     assertTrue(wl.isNonceConsumed(v0.addr, 5));
 
     // Then 3 — also passes (would have been NonceMismatch in the old model).
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, batchAt3);
+    wl.whitelistBySig(targets, deadline, batchAt3);
     assertTrue(wl.isNonceConsumed(v0.addr, 3));
 
     // Finally 7 — passes. Gaps at 0, 1, 2, 4, 6 remain available for
     // other in-flight sigs, demonstrating that any nonce allocation
     // pattern (sequential, sparse, time-based) is valid.
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, batchAt7);
+    wl.whitelistBySig(targets, deadline, batchAt7);
     assertTrue(wl.isNonceConsumed(v0.addr, 7));
     assertFalse(wl.isNonceConsumed(v0.addr, 4));
   }
@@ -784,7 +912,7 @@ contract RequestWhitelistTest is Test {
 
     vm.prank(ownerAddr);
     vm.expectRevert(QuorumSigLib.DuplicateSignature.selector);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelistBySig(targets, deadline, sigs);
   }
 
   // ---------- NM-003: admin *BySig sig replay is rejected -------------------
@@ -988,12 +1116,8 @@ contract RequestWhitelistTest is Test {
   function _whitelistAsOwner(address target) internal {
     address[] memory targets = new address[](1);
     targets[0] = target;
-    uint256 deadline = block.timestamp + 1 hours;
-    QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
-    sigs[0] = _signWhitelist(v0, targets, deadline);
-    sigs[1] = _signWhitelist(v1, targets, deadline);
     vm.prank(ownerAddr);
-    wl.whitelist(targets, deadline, sigs);
+    wl.whitelist(targets);
   }
 
   /// @dev Picks the next nonce for validator `v`: max of the on-chain
