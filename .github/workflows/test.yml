@@ -8,6 +8,10 @@ on:
   workflow_dispatch:
 
 env:
+  # Exact Solar build CI expects. `--use solar` runs whatever `solar` is on PATH (the one in the
+  # Foundry tarball installed below), and its version is embedded in the bytecode (CBOR `solar` key)
+  # and in the metadata Sourcify verifies against. Bump together with the Foundry version.
+  SOLAR_VERSION: 0.8.38+commit.a2b44354.solar.0.3.0-dev
   FOUNDRY_PROFILE: ci
 
 jobs:
@@ -49,6 +53,14 @@ jobs:
 
       - name: Run Forge build
         run: forge build --sizes ${{ matrix.use }}
+
+      - name: Check Solar build
+        if: matrix.compiler == 'solar'
+        run: |
+          versions=$(find out -name '*.json' -not -path 'out/build-info/*' \
+            -exec jq -r '.metadata.compiler.version // empty' {} + | sort -u)
+          echo "$versions"
+          test "$versions" = "$SOLAR_VERSION"
 
       - name: Run Forge tests
         run: forge test -vvv ${{ matrix.use }}
