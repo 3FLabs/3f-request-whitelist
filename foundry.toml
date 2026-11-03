@@ -36,6 +36,15 @@ shrink_run_limit = 20_000
 # `[profile.default]`; tighten here if CI-specific knobs are wanted.
 [profile.ci]
 
+# Solar, the experimental Rust compiler shipped with Foundry >= 1.9.
+# Local runs only: `forge test --profile solar`. CI passes `--use solar`
+# instead so the `ci` profile applies. Deployments stay on solc.
+# `evm_version` is pinned because solc 0.8.24 resolves to cancun, while
+# a profile set to Solar defaults to osaka.
+[profile.solar]
+solc_version = "solar"
+evm_version = "cancun"
+
 [fmt]
 tab_width = 2
 

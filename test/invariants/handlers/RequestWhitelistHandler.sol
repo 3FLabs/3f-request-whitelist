@@ -148,7 +148,7 @@ contract RequestWhitelistHandler is Test {
     // Keep the skip bounded so we don't blow past uint48.max and desync
     // the pausedUntil monotonicity check.
     uint256 skip = bound(uint256(skipSeconds), 1, 365 days);
-    vm.warp(block.timestamp + skip);
+    vm.warp(vm.getBlockTimestamp() + skip);
     _postUpdate();
     _tag("warp", true);
   }
@@ -543,7 +543,7 @@ contract RequestWhitelistHandler is Test {
   }
 
   function _deadlineFrom(uint32 deadlineOffset) internal view returns (uint256) {
-    return block.timestamp + bound(uint256(deadlineOffset), 1, 7 days);
+    return vm.getBlockTimestamp() + bound(uint256(deadlineOffset), 1, 7 days);
   }
 
   function _hashAddrArray(address[] memory xs) internal pure returns (bytes32) {

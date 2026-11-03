@@ -151,7 +151,7 @@ contract RequestWhitelistTest is Test {
     address[] memory targets = new address[](2);
     targets[0] = t0;
     targets[1] = t1;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -177,7 +177,7 @@ contract RequestWhitelistTest is Test {
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -201,7 +201,7 @@ contract RequestWhitelistTest is Test {
   function testWhitelistBySigOpenToAnyCallerWhileOwned() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -217,7 +217,7 @@ contract RequestWhitelistTest is Test {
   function testWhitelistRevertsExpired() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -232,7 +232,7 @@ contract RequestWhitelistTest is Test {
   function testWhitelistRevertsUnderQuorum() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](1);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -245,7 +245,7 @@ contract RequestWhitelistTest is Test {
   function testWhitelistRevertsDuplicateSigner() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -260,7 +260,7 @@ contract RequestWhitelistTest is Test {
     Vm.Wallet memory stranger = vm.createWallet("stranger");
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -274,7 +274,7 @@ contract RequestWhitelistTest is Test {
   function testWhitelistRevertsBadSignature() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -298,7 +298,7 @@ contract RequestWhitelistTest is Test {
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -314,7 +314,7 @@ contract RequestWhitelistTest is Test {
     // sig must be rejected `NonceConsumed`.
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig memory v0Sig0 = _signWhitelistWithNonce(v0, targets, deadline, 0);
     QuorumSigLib.Sig memory v1Sig0 = _signWhitelistWithNonce(v1, targets, deadline, 0);
@@ -338,7 +338,7 @@ contract RequestWhitelistTest is Test {
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
     sigs[1] = _signWhitelist(v1, targets, deadline);
@@ -353,7 +353,7 @@ contract RequestWhitelistTest is Test {
   function testSetValidatorNonceInvalidatesOldSigs() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
@@ -486,7 +486,7 @@ contract RequestWhitelistTest is Test {
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signUnwhitelist(v0, targets, deadline);
@@ -510,7 +510,7 @@ contract RequestWhitelistTest is Test {
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signUnwhitelist(v0, targets, deadline);
     sigs[1] = _signUnwhitelist(v1, targets, deadline);
@@ -519,7 +519,7 @@ contract RequestWhitelistTest is Test {
     // While paused, `isWhitelisted` masks to the Paused* variants —
     // assert the underlying bit was actually flipped by reading the
     // post-pause state.
-    vm.warp(block.timestamp + 2 days);
+    vm.warp(vm.getBlockTimestamp() + 2 days);
     assertFalse(wl.isPaused());
     assertFalse(_listed(t0));
   }
@@ -610,7 +610,7 @@ contract RequestWhitelistTest is Test {
     targets[0] = t0;
     vm.prank(ownerAddr);
     wl.unwhitelist(targets);
-    vm.warp(block.timestamp + 2 days);
+    vm.warp(vm.getBlockTimestamp() + 2 days);
     assertFalse(wl.isPaused());
     assertFalse(_listed(t0));
   }
@@ -646,7 +646,7 @@ contract RequestWhitelistTest is Test {
     assertFalse(_listed(t0));
     assertTrue(wl.isPaused());
 
-    vm.warp(block.timestamp + 1 days + 1);
+    vm.warp(vm.getBlockTimestamp() + 1 days + 1);
     assertTrue(_listed(t0));
     assertFalse(wl.isPaused());
   }
@@ -693,7 +693,7 @@ contract RequestWhitelistTest is Test {
   }
 
   function testAdminBySigRevertsWhileOwned() public {
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_ADD_VALIDATOR(), abi.encode(makeAddr("new")), deadline);
 
     vm.expectRevert(WhitelistErrors.OwnerStillSet.selector);
@@ -705,7 +705,7 @@ contract RequestWhitelistTest is Test {
     wl.renounceOwnership();
 
     address fresh = makeAddr("freshValidator");
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_ADD_VALIDATOR(), abi.encode(fresh), deadline);
 
     wl.addValidatorBySig(fresh, deadline, sigs);
@@ -718,7 +718,7 @@ contract RequestWhitelistTest is Test {
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelist(v0, targets, deadline);
     sigs[1] = _signWhitelist(v1, targets, deadline);
@@ -766,7 +766,7 @@ contract RequestWhitelistTest is Test {
     // v2 signs an unwhitelist at a low nonce, holds it in the mempool.
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig memory leaked = _signUnwhitelistWithNonce(v2, targets, deadline, 0);
 
     // Pad and remove v2.
@@ -811,7 +811,7 @@ contract RequestWhitelistTest is Test {
   function testWhitelistSigCannotBeReplayed() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
     sigs[0] = _signWhitelistWithNonce(v0, targets, deadline, 0);
@@ -833,7 +833,7 @@ contract RequestWhitelistTest is Test {
 
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig[] memory unsigs = new QuorumSigLib.Sig[](2);
     unsigs[0] = _signUnwhitelist(v0, targets, deadline);
@@ -864,7 +864,7 @@ contract RequestWhitelistTest is Test {
   function testSigsConsumableInAnyOrder() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     // Three independent batches, each signed at a distinct nonce.
     QuorumSigLib.Sig[] memory batchAt5 = new QuorumSigLib.Sig[](2);
@@ -903,7 +903,7 @@ contract RequestWhitelistTest is Test {
   function testSameNonceTwiceInOneCallReverts() public {
     address[] memory targets = new address[](1);
     targets[0] = t0;
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
 
     QuorumSigLib.Sig memory v0Sig = _signWhitelistWithNonce(v0, targets, deadline, 0);
     QuorumSigLib.Sig[] memory sigs = new QuorumSigLib.Sig[](2);
@@ -922,7 +922,7 @@ contract RequestWhitelistTest is Test {
     wl.renounceOwnership();
 
     address fresh = makeAddr("freshValidator");
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory addSigs = _signAdmin(ACTION_ADD_VALIDATOR(), abi.encode(fresh), deadline);
     wl.addValidatorBySig(fresh, deadline, addSigs);
     assertTrue(wl.isValidator(fresh));
@@ -940,7 +940,7 @@ contract RequestWhitelistTest is Test {
     wl.renounceOwnership();
 
     address attacker = makeAddr("attacker");
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory addSigs = _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(attacker, true), deadline);
     wl.setComplianceOfficerBySig(attacker, true, deadline, addSigs);
     assertTrue(wl.isComplianceOfficer(attacker));
@@ -1007,7 +1007,7 @@ contract RequestWhitelistTest is Test {
     wl.pauseFor(1 days);
 
     address fresh = makeAddr("freshValidator");
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_ADD_VALIDATOR(), abi.encode(fresh), deadline);
     wl.addValidatorBySig(fresh, deadline, sigs);
     assertTrue(wl.isValidator(fresh));
@@ -1024,7 +1024,7 @@ contract RequestWhitelistTest is Test {
     vm.prank(compliance);
     wl.pauseFor(1 days);
 
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_REMOVE_VALIDATOR(), abi.encode(v2.addr), deadline);
     wl.removeValidatorBySig(v2.addr, deadline, sigs);
     assertFalse(wl.isValidator(v2.addr));
@@ -1036,7 +1036,7 @@ contract RequestWhitelistTest is Test {
     vm.prank(compliance);
     wl.pauseFor(1 days);
 
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory sigs = _signAdmin(ACTION_SET_QUORUM(), abi.encode(uint16(1)), deadline);
     wl.setQuorumBySig(1, deadline, sigs);
     assertEq(wl.quorum(), 1);
@@ -1055,7 +1055,7 @@ contract RequestWhitelistTest is Test {
     assertTrue(wl.isPaused());
 
     address newOfficer = makeAddr("newOfficer");
-    uint256 deadline = block.timestamp + 1 hours;
+    uint256 deadline = vm.getBlockTimestamp() + 1 hours;
     QuorumSigLib.Sig[] memory swapIn = _signAdmin(ACTION_SET_COMPLIANCE(), abi.encode(newOfficer, true), deadline);
     wl.setComplianceOfficerBySig(newOfficer, true, deadline, swapIn);
 

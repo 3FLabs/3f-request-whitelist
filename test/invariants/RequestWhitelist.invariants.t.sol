@@ -148,7 +148,7 @@ contract RequestWhitelistInvariants is Test {
   ///      divergence if a future refactor caches pause state.
   function invariant_C2_isPausedMatchesTimestamp() external view {
     bool onChain = wl.isPaused();
-    bool expected = block.timestamp < wl.pausedUntil();
+    bool expected = vm.getBlockTimestamp() < wl.pausedUntil();
     assertEq(onChain, expected, "C2: isPaused/pausedUntil mismatch");
   }
 
