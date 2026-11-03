@@ -42,8 +42,6 @@ shrink_run_limit = 20_000
 # `evm_version` is pinned because solc 0.8.24 resolves to cancun, while
 # a profile set to Solar defaults to osaka.
 [profile.solar]
-# Not version-pinned here: forge has no installer for Solar and runs the `solar` on PATH (bundled
-# with Foundry). CI checks the exact build via SOLAR_VERSION in .github/workflows/test.yml.
 solc_version = "solar"
 evm_version = "cancun"
 
